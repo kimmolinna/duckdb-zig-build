@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) !void {
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const optimize = b.standardOptimizeOption(.{});
-    var child = std.process.Child.init(&[_][]const u8{ "python3.11", "scripts/generate_version_hpp.py" }, std.heap.page_allocator);
+    var child = std.process.Child.init(&[_][]const u8{ "python", "scripts/generate_version_hpp.py" }, std.heap.page_allocator);
     try child.spawn();
     _ = try child.wait();
     const fastpforlib = b.addStaticLibrary(.{
@@ -289,13 +289,13 @@ pub fn build(b: *std.Build) !void {
     duckdb.addIncludePath(b.path("third_party/libpg_query/include"));
     duckdb.addIncludePath(b.path("src/duckdb/execution/index/art/"));
     duckdb.addIncludePath(b.path("third_party/openssl/include"));
-    duckdb.addCMacro("BUILD_HTTPFS_EXTENSION", "TRUE");
-    duckdb.addCMacro("BUILD_ICU_EXTENSION", "TRUE");
-    duckdb.addCMacro("BUILD_PARQUET_EXTENSION", "TRUE");
-    duckdb.addCMacro("DUCKDB_MAIN_LIBRARY", null);
-    duckdb.addCMacro("DUCKDB_USE_STANDARD_ASSERT", null);
-    duckdb.addCMacro("DUCKDB", null);
-    duckdb.addCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
+    duckdb.root_module.addCMacro("BUILD_HTTPFS_EXTENSION", "TRUE");
+    duckdb.root_module.addCMacro("BUILD_ICU_EXTENSION", "TRUE");
+    duckdb.root_module.addCMacro("BUILD_PARQUET_EXTENSION", "TRUE");
+    duckdb.root_module.addCMacro("DUCKDB_MAIN_LIBRARY", "");
+    duckdb.root_module.addCMacro("DUCKDB_USE_STANDARD_ASSERT", "");
+    duckdb.root_module.addCMacro("DUCKDB", "");
+    duckdb.root_module.addCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
     duckdb.linkLibrary(catalog);
     duckdb.linkLibrary(common);
     duckdb.linkLibrary(core_funtions);
@@ -343,11 +343,11 @@ pub fn build(b: *std.Build) !void {
     sqlite_api.addIncludePath(b.path("tools/sqlite3_api_wrapper/sqlite3_udf_api/include"));
     sqlite_api.addIncludePath(b.path("tools/sqlite3_api_wrapper/sqlite3"));
     sqlite_api.addIncludePath(b.path("tools/sqlite3_api_wrapper/test/include"));
-    sqlite_api.addCMacro("BUILD_HTTPFS_EXTENSION", "ON");
-    sqlite_api.addCMacro("BUILD_ICU_EXTENSION", "ON");
-    sqlite_api.addCMacro("BUILD_PARQUET_EXTENSION", "TRUE");
-    sqlite_api.addCMacro("SQLITE_SHELL_IS_UTF8", null);
-    sqlite_api.addCMacro("USE_DUCKDB_SHELL_WRAPPER", "TRUE");
+    sqlite_api.root_module.addCMacro("BUILD_HTTPFS_EXTENSION", "ON");
+    sqlite_api.root_module.addCMacro("BUILD_ICU_EXTENSION", "ON");
+    sqlite_api.root_module.addCMacro("BUILD_PARQUET_EXTENSION", "TRUE");
+    sqlite_api.root_module.addCMacro("SQLITE_SHELL_IS_UTF8", "");
+    sqlite_api.root_module.addCMacro("USE_DUCKDB_SHELL_WRAPPER", "TRUE");
     sqlite_api.linkLibrary(utf8proc);
     sqlite_api.linkLibrary(duckdb);
     sqlite_api.linkLibC();
@@ -368,8 +368,8 @@ pub fn build(b: *std.Build) !void {
     shell.addIncludePath(b.path("third_party/openssl/include"));
     shell.addIncludePath(b.path("tools/shell/include"));
     shell.addIncludePath(b.path("tools/sqlite3_api_wrapper/include"));
-    shell.addCMacro("DUCKDB_BUILD_LIBRARY", null);
-    shell.addCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
+    shell.root_module.addCMacro("DUCKDB_BUILD_LIBRARY", "");
+    shell.root_module.addCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
     shell.addIncludePath(b.path("third_party/openssl/include"));
     shell.addObjectFile(b.path("third_party/openssl/lib/libcrypto.lib"));
     shell.addObjectFile(b.path("third_party/openssl/lib/libssl.lib"));
@@ -458,7 +458,7 @@ fn basicSetup(b: *std.Build, in: *std.Build.Step.Compile) !void {
     for (include_dirs) |include_dir| {
         in.addIncludePath(b.path(include_dir));
     }
-    in.addCMacro("DUCKDB_BUILD_LIBRARY", null);
+    in.root_module.addCMacro("DUCKDB_BUILD_LIBRARY", "");
     in.linkLibCpp();
     in.root_module.pic = true;
     in.root_module.strip = true;

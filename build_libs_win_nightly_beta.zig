@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) !void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const optimize = b.standardOptimizeOption(.{});
 
-    var child = std.ChildProcess.init(&[_][]const u8{ "python3.11", "scripts/generate_version_hpp.py" }, std.heap.page_allocator);
+    var child = std.process.Child.init(&[_][]const u8{ "python", "scripts/generate_version_hpp.py" }, std.heap.page_allocator);
     try child.spawn();
     _ = try child.wait();
 
@@ -250,7 +250,7 @@ fn basicSetup(b: *std.Build, in: *std.Build.Step.Compile) !void {
     for (include_dirs) |include_dir| {
         in.addIncludePath(std.Build.LazyPath.relative(include_dir));
     }
-    in.defineCMacro("DUCKDB_BUILD_LIBRARY", null);
+    in.root_module.addCMacro("DUCKDB_BUILD_LIBRARY", "");
     in.linkLibC();
     in.linkLibCpp();
     in.root_module.pic = true;
