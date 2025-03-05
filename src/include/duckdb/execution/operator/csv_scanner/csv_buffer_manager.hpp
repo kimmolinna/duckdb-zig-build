@@ -22,7 +22,8 @@ class CSVStateMachine;
 class CSVBufferManager {
 public:
 	CSVBufferManager(ClientContext &context, const CSVReaderOptions &options, const string &file_path,
-	                 const idx_t file_idx, bool per_file_single_threaded = false);
+	                 bool per_file_single_threaded = false, unique_ptr<CSVFileHandle> file_handle = nullptr);
+
 	//! Returns a buffer from a buffer id (starting from 0). If it's in the auto-detection then we cache new buffers
 	//! Otherwise we remove them from the cache if they are already there, or just return them bypassing the cache.
 	shared_ptr<CSVBufferHandle> GetBuffer(const idx_t buffer_idx);
@@ -45,6 +46,10 @@ public:
 	void ResetBufferManager();
 	string GetFilePath() const;
 
+	bool IsBlockUnloaded(idx_t block_idx);
+
+	idx_t GetBytesRead() const;
+
 	ClientContext &context;
 	idx_t skip_rows = 0;
 	bool sniffing = false;
@@ -53,8 +58,6 @@ public:
 private:
 	//! Reads next buffer in reference to cached_buffers.front()
 	bool ReadNextAndCacheIt();
-	//! The file index this Buffer Manager refers to
-	const idx_t file_idx;
 	//! The file path this Buffer Manager refers to
 	const string file_path;
 	//! The cached buffers

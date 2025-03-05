@@ -41,6 +41,28 @@ public:
 	unique_ptr<PythonTableArrowArrayStreamFactory> arrow_factory;
 };
 
+struct DefaultConnectionHolder {
+public:
+	DefaultConnectionHolder() {
+	}
+	~DefaultConnectionHolder() {
+	}
+
+public:
+	DefaultConnectionHolder(const DefaultConnectionHolder &other) = delete;
+	DefaultConnectionHolder(DefaultConnectionHolder &&other) = delete;
+	DefaultConnectionHolder &operator=(const DefaultConnectionHolder &other) = delete;
+	DefaultConnectionHolder &operator=(DefaultConnectionHolder &&other) = delete;
+
+public:
+	shared_ptr<DuckDBPyConnection> Get();
+	void Set(shared_ptr<DuckDBPyConnection> conn);
+
+private:
+	shared_ptr<DuckDBPyConnection> connection;
+	mutex l;
+};
+
 struct ConnectionGuard {
 public:
 	ConnectionGuard() {
@@ -67,6 +89,11 @@ public:
 		}
 		return *connection;
 	}
+
+	bool ConnectionIsClosed() const {
+		return connection == nullptr;
+	}
+
 	const Connection &GetConnection() const {
 		if (!connection) {
 			ThrowConnectionException();
@@ -160,7 +187,9 @@ public:
 
 	static bool DetectAndGetEnvironment();
 	static bool IsJupyter();
+	static std::string FormattedPythonVersion();
 	static shared_ptr<DuckDBPyConnection> DefaultConnection();
+	static void SetDefaultConnection(shared_ptr<DuckDBPyConnection> conn);
 	static PythonImportCache *ImportCache();
 	static bool IsInteractive();
 
@@ -210,6 +239,8 @@ public:
 	void ExecuteImmediately(vector<unique_ptr<SQLStatement>> statements);
 	unique_ptr<PreparedStatement> PrepareQuery(unique_ptr<SQLStatement> statement);
 	unique_ptr<QueryResult> ExecuteInternal(PreparedStatement &prep, py::object params = py::list());
+	unique_ptr<QueryResult> PrepareAndExecuteInternal(unique_ptr<SQLStatement> statement,
+	                                                  py::object params = py::list());
 
 	shared_ptr<DuckDBPyConnection> Execute(const py::object &query, py::object params = py::list());
 	shared_ptr<DuckDBPyConnection> ExecuteFromString(const string &query);
@@ -228,7 +259,7 @@ public:
 
 	unique_ptr<DuckDBPyRelation> Table(const string &tname);
 
-	unique_ptr<DuckDBPyRelation> Values(py::object params = py::none());
+	unique_ptr<DuckDBPyRelation> Values(const py::args &params);
 
 	unique_ptr<DuckDBPyRelation> View(const string &vname);
 
@@ -245,14 +276,6 @@ public:
 	                                          bool union_by_name, const py::object &compression = py::none());
 
 	unique_ptr<DuckDBPyRelation> FromArrow(py::object &arrow_object);
-
-	unique_ptr<DuckDBPyRelation> FromSubstrait(py::bytes &proto);
-
-	unique_ptr<DuckDBPyRelation> GetSubstrait(const string &query, bool enable_optimizer = true);
-
-	unique_ptr<DuckDBPyRelation> GetSubstraitJSON(const string &query, bool enable_optimizer = true);
-
-	unique_ptr<DuckDBPyRelation> FromSubstraitJSON(const string &json);
 
 	unordered_set<string> GetTableNames(const string &query);
 
@@ -310,12 +333,11 @@ public:
 	bool FileSystemIsRegistered(const string &name);
 
 	//! Default connection to an in-memory database
-	static shared_ptr<DuckDBPyConnection> default_connection;
+	static DefaultConnectionHolder default_connection;
 	//! Caches and provides an interface to get frequently used modules+subtypes
 	static shared_ptr<PythonImportCache> import_cache;
 
 	static bool IsPandasDataframe(const py::object &object);
-	static bool IsPolarsDataframe(const py::object &object);
 	static PyArrowObjectType GetArrowType(const py::handle &obj);
 	static bool IsAcceptedArrowObject(const py::object &object);
 	static NumpyObjectType IsAcceptedNumpyObject(const py::object &object);
@@ -332,6 +354,7 @@ private:
 	vector<unique_ptr<SQLStatement>> GetStatements(const py::object &query);
 
 	static PythonEnvironmentType environment;
+	static std::string formatted_python_version;
 	static void DetectEnvironment();
 };
 

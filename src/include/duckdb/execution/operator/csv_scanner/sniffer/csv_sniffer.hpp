@@ -30,7 +30,7 @@ struct DialectCandidates {
 	explicit DialectCandidates(const CSVStateMachineOptions &options);
 
 	//! Static functions to get defaults of the search space
-	static vector<char> GetDefaultDelimiter();
+	static vector<string> GetDefaultDelimiter();
 
 	static vector<vector<char>> GetDefaultQuote();
 
@@ -43,7 +43,7 @@ struct DialectCandidates {
 	string Print();
 
 	//! Candidates for the delimiter
-	vector<char> delim_candidates;
+	vector<string> delim_candidates;
 	//! Candidates for the comment
 	vector<char> comment_candidates;
 	//! Quote-Rule Candidates
@@ -108,8 +108,9 @@ struct HasType {
 //! Sniffer that detects Header, Dialect and Types of CSV Files
 class CSVSniffer {
 public:
-	explicit CSVSniffer(CSVReaderOptions &options_p, shared_ptr<CSVBufferManager> buffer_manager_p,
-	                    CSVStateMachineCache &state_machine_cache, bool default_null_to_varchar = true);
+	explicit CSVSniffer(CSVReaderOptions &options_p, const MultiFileReaderOptions &file_options,
+	                    shared_ptr<CSVBufferManager> buffer_manager_p, CSVStateMachineCache &state_machine_cache,
+	                    bool default_null_to_varchar = true);
 
 	//! Main method that sniffs the CSV file, returns the types, names and options as a result
 	//! CSV Sniffing consists of five steps:
@@ -136,6 +137,10 @@ public:
 	static bool CanYouCastIt(ClientContext &context, const string_t value, const LogicalType &type,
 	                         const DialectOptions &dialect_options, const bool is_null, const char decimal_separator);
 
+	idx_t LinesSniffed() const;
+
+	bool EmptyOrOnlyHeader() const;
+
 private:
 	//! CSV State Machine Cache
 	CSVStateMachineCache &state_machine_cache;
@@ -145,15 +150,18 @@ private:
 	vector<unique_ptr<ColumnCountScanner>> candidates;
 	//! Reference to original CSV Options, it will be modified as a result of the sniffer.
 	CSVReaderOptions &options;
+	//! The multi-file reader options
+	const MultiFileReaderOptions &file_options;
 	//! Buffer being used on sniffer
 	shared_ptr<CSVBufferManager> buffer_manager;
 	//! Information regarding columns that were set by user/query
 	SetColumns set_columns;
 	shared_ptr<CSVErrorHandler> error_handler;
 	shared_ptr<CSVErrorHandler> detection_error_handler;
-
+	//! Number of lines sniffed in this sniffer
+	idx_t lines_sniffed;
 	//! Sets the result options
-	void SetResultOptions();
+	void SetResultOptions() const;
 
 	//! ------------------------------------------------------//
 	//! ----------------- Dialect Detection ----------------- //
@@ -231,8 +239,11 @@ private:
 	DetectHeaderInternal(ClientContext &context, vector<HeaderValue> &best_header_row, CSVStateMachine &state_machine,
 	                     const SetColumns &set_columns,
 	                     unordered_map<idx_t, vector<LogicalType>> &best_sql_types_candidates_per_column_idx,
-	                     CSVReaderOptions &options, CSVErrorHandler &error_handler);
+	                     CSVReaderOptions &options, const MultiFileReaderOptions &file_options,
+	                     CSVErrorHandler &error_handler);
 	vector<string> names;
+	//! If the file only has a header
+	bool single_row_file = false;
 
 	//! ------------------------------------------------------//
 	//! ------------------ Type Replacement ----------------- //
