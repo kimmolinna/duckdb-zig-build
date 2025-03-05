@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) !void {
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const optimize = b.standardOptimizeOption(.{});
-    var child = std.ChildProcess.init(&[_][]const u8{ "python3.11", "scripts/generate_version_hpp.py" }, std.heap.page_allocator);
+    var child = std.process.Child.init(&[_][]const u8{ "python3.11", "scripts/generate_version_hpp.py" }, std.heap.page_allocator);
     try child.spawn();
     _ = try child.wait();
     const fastpforlib = b.addStaticLibrary(.{
@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) !void {
     pg_query.addCSourceFiles(.{
         .files = (try iterateFiles(b, "third_party/libpg_query")).items,
     });
-    pg_query.addIncludePath(std.Build.LazyPath.relative("third_party/libpg_query/include"));
+    pg_query.addIncludePath(b.path("third_party/libpg_query/include"));
     _ = try basicSetup(b, pg_query);
     const re2 = b.addStaticLibrary(.{
         .name = "re2",
@@ -113,10 +113,10 @@ pub fn build(b: *std.Build) !void {
     httpfs_extension.addCSourceFiles(.{
         .files = (try iterateFiles(b, "extension/httpfs")).items,
     });
-    httpfs_extension.addIncludePath(std.Build.LazyPath.relative("extension/httpfs/include"));
-    httpfs_extension.addIncludePath(std.Build.LazyPath.relative("third_party/httplib"));
-    httpfs_extension.addIncludePath(std.Build.LazyPath.relative("third_party/openssl/include"));
-    httpfs_extension.addIncludePath(std.Build.LazyPath.relative("third_party/picohash"));
+    httpfs_extension.addIncludePath(b.path("extension/httpfs/include"));
+    httpfs_extension.addIncludePath(b.path("third_party/httplib"));
+    httpfs_extension.addIncludePath(b.path("third_party/openssl/include"));
+    httpfs_extension.addIncludePath(b.path("third_party/picohash"));
     _ = try basicSetup(b, httpfs_extension);
     const icu_extension = b.addStaticLibrary(.{
         .name = "icu_extension",
@@ -126,9 +126,9 @@ pub fn build(b: *std.Build) !void {
     icu_extension.addCSourceFiles(.{
         .files = (try iterateFiles(b, "extension/icu")).items,
     });
-    icu_extension.addIncludePath(std.Build.LazyPath.relative("extension/icu/include"));
-    icu_extension.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/common"));
-    icu_extension.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/i18n"));
+    icu_extension.addIncludePath(b.path("extension/icu/include"));
+    icu_extension.addIncludePath(b.path("extension/icu/third_party/icu/common"));
+    icu_extension.addIncludePath(b.path("extension/icu/third_party/icu/i18n"));
     _ = try basicSetup(b, icu_extension);
 
     const parquet_extension = b.addStaticLibrary(.{
@@ -151,12 +151,12 @@ pub fn build(b: *std.Build) !void {
     parquet_extension.addCSourceFiles(.{
         .files = (try iterateFiles(b, "third_party/zstd")).items,
     });
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("extension/parquet/include"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/parquet"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/snappy"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/thrift"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/zstd/include"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/lz4"));
+    parquet_extension.addIncludePath(b.path("extension/parquet/include"));
+    parquet_extension.addIncludePath(b.path("third_party/parquet"));
+    parquet_extension.addIncludePath(b.path("third_party/snappy"));
+    parquet_extension.addIncludePath(b.path("third_party/thrift"));
+    parquet_extension.addIncludePath(b.path("third_party/zstd/include"));
+    parquet_extension.addIncludePath(b.path("third_party/lz4"));
     _ = try basicSetup(b, parquet_extension);
     const catalog = b.addStaticLibrary(.{
         .name = "catalog",
@@ -280,22 +280,22 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    duckdb.addIncludePath(std.Build.LazyPath.relative("extension/httpfs/include"));
-    duckdb.addIncludePath(std.Build.LazyPath.relative("extension/icu/include"));
-    duckdb.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/common"));
-    duckdb.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/i18n"));
-    duckdb.addIncludePath(std.Build.LazyPath.relative("extension/parquet/include"));
-    duckdb.addIncludePath(std.Build.LazyPath.relative("third_party/httplib"));
-    duckdb.addIncludePath(std.Build.LazyPath.relative("third_party/libpg_query/include"));
-    duckdb.addIncludePath(std.Build.LazyPath.relative("src/duckdb/execution/index/art/"));
-    duckdb.addIncludePath(std.Build.LazyPath.relative("third_party/openssl/include"));
-    duckdb.defineCMacro("BUILD_HTTPFS_EXTENSION", "TRUE");
-    duckdb.defineCMacro("BUILD_ICU_EXTENSION", "TRUE");
-    duckdb.defineCMacro("BUILD_PARQUET_EXTENSION", "TRUE");
-    duckdb.defineCMacro("DUCKDB_MAIN_LIBRARY", null);
-    duckdb.defineCMacro("DUCKDB_USE_STANDARD_ASSERT", null);
-    duckdb.defineCMacro("DUCKDB", null);
-    duckdb.defineCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
+    duckdb.addIncludePath(b.path("extension/httpfs/include"));
+    duckdb.addIncludePath(b.path("extension/icu/include"));
+    duckdb.addIncludePath(b.path("extension/icu/third_party/icu/common"));
+    duckdb.addIncludePath(b.path("extension/icu/third_party/icu/i18n"));
+    duckdb.addIncludePath(b.path("extension/parquet/include"));
+    duckdb.addIncludePath(b.path("third_party/httplib"));
+    duckdb.addIncludePath(b.path("third_party/libpg_query/include"));
+    duckdb.addIncludePath(b.path("src/duckdb/execution/index/art/"));
+    duckdb.addIncludePath(b.path("third_party/openssl/include"));
+    duckdb.addCMacro("BUILD_HTTPFS_EXTENSION", "TRUE");
+    duckdb.addCMacro("BUILD_ICU_EXTENSION", "TRUE");
+    duckdb.addCMacro("BUILD_PARQUET_EXTENSION", "TRUE");
+    duckdb.addCMacro("DUCKDB_MAIN_LIBRARY", null);
+    duckdb.addCMacro("DUCKDB_USE_STANDARD_ASSERT", null);
+    duckdb.addCMacro("DUCKDB", null);
+    duckdb.addCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
     duckdb.linkLibrary(catalog);
     duckdb.linkLibrary(common);
     duckdb.linkLibrary(core_funtions);
@@ -330,24 +330,24 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     sqlite_api.addCSourceFiles(.{ .files = (try iterateFiles(b, "tools/sqlite3_api_wrapper")).items });
-    sqlite_api.addCSourceFile(.{ .file = .{ .path = "tools/sqlite3_api_wrapper/sqlite3/os_win.c" }, .flags = &.{"-Wno-error=implicit-function-declaration"} });
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("extension"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("extension/httpfs/include"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("extension/icu/include"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/common"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/i18n"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("extension/parquet/include"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("third_party/catch"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("third_party/libpg_query/include"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("tools/sqlite3_api_wrapper/include"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("tools/sqlite3_api_wrapper/sqlite3_udf_api/include"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("tools/sqlite3_api_wrapper/sqlite3"));
-    sqlite_api.addIncludePath(std.Build.LazyPath.relative("tools/sqlite3_api_wrapper/test/include"));
-    sqlite_api.defineCMacro("BUILD_HTTPFS_EXTENSION", "ON");
-    sqlite_api.defineCMacro("BUILD_ICU_EXTENSION", "ON");
-    sqlite_api.defineCMacro("BUILD_PARQUET_EXTENSION", "TRUE");
-    sqlite_api.defineCMacro("SQLITE_SHELL_IS_UTF8", null);
-    sqlite_api.defineCMacro("USE_DUCKDB_SHELL_WRAPPER", "TRUE");
+    sqlite_api.addCSourceFile(.{ .file = b.path("tools/sqlite3_api_wrapper/sqlite3/os_win.c"), .flags = &.{"-Wno-error=implicit-function-declaration"} });
+    sqlite_api.addIncludePath(b.path("extension"));
+    sqlite_api.addIncludePath(b.path("extension/httpfs/include"));
+    sqlite_api.addIncludePath(b.path("extension/icu/include"));
+    sqlite_api.addIncludePath(b.path("extension/icu/third_party/icu/common"));
+    sqlite_api.addIncludePath(b.path("extension/icu/third_party/icu/i18n"));
+    sqlite_api.addIncludePath(b.path("extension/parquet/include"));
+    sqlite_api.addIncludePath(b.path("third_party/catch"));
+    sqlite_api.addIncludePath(b.path("third_party/libpg_query/include"));
+    sqlite_api.addIncludePath(b.path("tools/sqlite3_api_wrapper/include"));
+    sqlite_api.addIncludePath(b.path("tools/sqlite3_api_wrapper/sqlite3_udf_api/include"));
+    sqlite_api.addIncludePath(b.path("tools/sqlite3_api_wrapper/sqlite3"));
+    sqlite_api.addIncludePath(b.path("tools/sqlite3_api_wrapper/test/include"));
+    sqlite_api.addCMacro("BUILD_HTTPFS_EXTENSION", "ON");
+    sqlite_api.addCMacro("BUILD_ICU_EXTENSION", "ON");
+    sqlite_api.addCMacro("BUILD_PARQUET_EXTENSION", "TRUE");
+    sqlite_api.addCMacro("SQLITE_SHELL_IS_UTF8", null);
+    sqlite_api.addCMacro("USE_DUCKDB_SHELL_WRAPPER", "TRUE");
     sqlite_api.linkLibrary(utf8proc);
     sqlite_api.linkLibrary(duckdb);
     sqlite_api.linkLibC();
@@ -357,33 +357,33 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    shell.addCSourceFile(.{ .file = std.Build.LazyPath.relative("tools/shell/shell.c"), .flags = &.{} });
-    shell.addIncludePath(std.Build.LazyPath.relative("extension/httpfs/include"));
-    shell.addIncludePath(std.Build.LazyPath.relative("extension/icu/include"));
-    shell.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/common"));
-    shell.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/i18n"));
-    shell.addIncludePath(std.Build.LazyPath.relative("extension/parquet/include"));
-    shell.addIncludePath(std.Build.LazyPath.relative("third_party/httplib"));
-    shell.addIncludePath(std.Build.LazyPath.relative("third_party/libpg_query/include"));
-    shell.addIncludePath(std.Build.LazyPath.relative("third_party/openssl/include"));
-    shell.addIncludePath(std.Build.LazyPath.relative("tools/shell/include"));
-    shell.addIncludePath(std.Build.LazyPath.relative("tools/sqlite3_api_wrapper/include"));
-    shell.defineCMacro("DUCKDB_BUILD_LIBRARY", null);
-    shell.defineCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
-    shell.addIncludePath(std.Build.LazyPath.relative("third_party/openssl/include"));
-    shell.addObjectFile(std.Build.LazyPath.relative("third_party/openssl/lib/libcrypto.lib"));
-    shell.addObjectFile(std.Build.LazyPath.relative("third_party/openssl/lib/libssl.lib"));
-    shell.addObjectFile(std.Build.LazyPath.relative("third_party/win64/ws2_32.lib"));
-    shell.addObjectFile(std.Build.LazyPath.relative("third_party/win64/crypt32.lib"));
-    shell.addObjectFile(std.Build.LazyPath.relative("third_party/win64/cryptui.lib"));
-    shell.addObjectFile(std.Build.LazyPath.relative("third_party/win64/rstrtmgr.lib"));
+    shell.addCSourceFile(.{ .file = b.path("tools/shell/shell.c"), .flags = &.{} });
+    shell.addIncludePath(b.path("extension/httpfs/include"));
+    shell.addIncludePath(b.path("extension/icu/include"));
+    shell.addIncludePath(b.path("extension/icu/third_party/icu/common"));
+    shell.addIncludePath(b.path("extension/icu/third_party/icu/i18n"));
+    shell.addIncludePath(b.path("extension/parquet/include"));
+    shell.addIncludePath(b.path("third_party/httplib"));
+    shell.addIncludePath(b.path("third_party/libpg_query/include"));
+    shell.addIncludePath(b.path("third_party/openssl/include"));
+    shell.addIncludePath(b.path("tools/shell/include"));
+    shell.addIncludePath(b.path("tools/sqlite3_api_wrapper/include"));
+    shell.addCMacro("DUCKDB_BUILD_LIBRARY", null);
+    shell.addCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
+    shell.addIncludePath(b.path("third_party/openssl/include"));
+    shell.addObjectFile(b.path("third_party/openssl/lib/libcrypto.lib"));
+    shell.addObjectFile(b.path("third_party/openssl/lib/libssl.lib"));
+    shell.addObjectFile(b.path("third_party/win64/ws2_32.lib"));
+    shell.addObjectFile(b.path("third_party/win64/crypt32.lib"));
+    shell.addObjectFile(b.path("third_party/win64/cryptui.lib"));
+    shell.addObjectFile(b.path("third_party/win64/rstrtmgr.lib"));
     shell.step.dependOn(&b.addInstallFileWithDir(
-        .{ .path = "third_party/openssl/lib/libssl-3-x64.dll" },
+        b.path("third_party/openssl/lib/libssl-3-x64.dll"),
         .bin,
         "libssl-3-x64.dll",
     ).step);
     shell.step.dependOn(&b.addInstallFileWithDir(
-        .{ .path = "third_party/openssl/lib/libcrypto-3-x64.dll" },
+        b.path("third_party/openssl/lib/libcrypto-3-x64.dll"),
         .bin,
         "libcrypto-3-x64.dll",
     ).step);
@@ -456,9 +456,9 @@ fn basicSetup(b: *std.Build, in: *std.Build.Step.Compile) !void {
         "third_party/utf8proc/include",
     };
     for (include_dirs) |include_dir| {
-        in.addIncludePath(std.Build.LazyPath.relative(include_dir));
+        in.addIncludePath(b.path(include_dir));
     }
-    in.defineCMacro("DUCKDB_BUILD_LIBRARY", null);
+    in.addCMacro("DUCKDB_BUILD_LIBRARY", null);
     in.linkLibCpp();
     in.root_module.pic = true;
     in.root_module.strip = true;

@@ -74,7 +74,7 @@ pub fn build(b: *std.Build) !void {
     pg_query.addCSourceFiles(.{
         .files = (try iterateFiles(b, "third_party/libpg_query")).items,
     });
-    pg_query.addIncludePath(std.Build.LazyPath.relative("third_party/libpg_query/include"));
+    pg_query.addIncludePath(std.Build.path(b, "third_party/libpg_query/include"));
     _ = try basicSetup(b, pg_query);
     const re2 = b.addStaticLibrary(.{
         .name = "re2",
@@ -111,10 +111,10 @@ pub fn build(b: *std.Build) !void {
     httpfs_extension.addCSourceFiles(.{
         .files = (try iterateFiles(b, "extension/httpfs")).items,
     });
-    httpfs_extension.addIncludePath(std.Build.LazyPath.relative("extension/httpfs/include"));
-    httpfs_extension.addIncludePath(std.Build.LazyPath.relative("third_party/httplib"));
-    httpfs_extension.addIncludePath(std.Build.LazyPath.relative("third_party/openssl/include"));
-    httpfs_extension.addIncludePath(std.Build.LazyPath.relative("third_party/picohash"));
+    httpfs_extension.addIncludePath(std.Build.path(b, "extension/httpfs/include"));
+    httpfs_extension.addIncludePath(std.Build.path(b, "third_party/httplib"));
+    httpfs_extension.addIncludePath(std.Build.path(b, "third_party/openssl/include"));
+    httpfs_extension.addIncludePath(std.Build.path(b, "third_party/picohash"));
     _ = try basicSetup(b, httpfs_extension);
     const icu_extension = b.addStaticLibrary(.{
         .name = "icu_extension",
@@ -124,9 +124,9 @@ pub fn build(b: *std.Build) !void {
     icu_extension.addCSourceFiles(.{
         .files = (try iterateFiles(b, "extension/icu")).items,
     });
-    icu_extension.addIncludePath(std.Build.LazyPath.relative("extension/icu/include"));
-    icu_extension.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/common"));
-    icu_extension.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/i18n"));
+    icu_extension.addIncludePath(std.Build.path(b, "extension/icu/include"));
+    icu_extension.addIncludePath(std.Build.path(b, "extension/icu/third_party/icu/common"));
+    icu_extension.addIncludePath(std.Build.path(b, "extension/icu/third_party/icu/i18n"));
     _ = try basicSetup(b, icu_extension);
 
     const parquet_extension = b.addStaticLibrary(.{
@@ -149,12 +149,12 @@ pub fn build(b: *std.Build) !void {
     parquet_extension.addCSourceFiles(.{
         .files = (try iterateFiles(b, "third_party/zstd")).items,
     });
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("extension/parquet/include"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/parquet"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/snappy"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/thrift"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/zstd/include"));
-    parquet_extension.addIncludePath(std.Build.LazyPath.relative("third_party/lz4"));
+    parquet_extension.addIncludePath(std.Build.path(b, "extension/parquet/include"));
+    parquet_extension.addIncludePath(std.Build.path(b, "third_party/parquet"));
+    parquet_extension.addIncludePath(std.Build.path(b, "third_party/snappy"));
+    parquet_extension.addIncludePath(std.Build.path(b, "third_party/thrift"));
+    parquet_extension.addIncludePath(std.Build.path(b, "third_party/zstd/include"));
+    parquet_extension.addIncludePath(std.Build.path(b, "third_party/lz4"));
     _ = try basicSetup(b, parquet_extension);
     const catalog = b.addStaticLibrary(.{
         .name = "catalog",
@@ -323,11 +323,11 @@ fn basicSetup(b: *std.Build, in: *std.Build.Step.Compile) !void {
         "third_party/utf8proc/include",
     };
     for (include_dirs) |include_dir| {
-        in.addIncludePath(std.Build.LazyPath.relative(include_dir));
+        in.addIncludePath(std.Build.path(b, include_dir));
     }
-    in.defineCMacro("DUCKDB_BUILD_LIBRARY", null);
-    in.defineCMacro("DUCKDB_MAIN_LIBRARY", null);
-    in.defineCMacro("DUCKDB", null);
+    in.root_module.addCMacro("DUCKDB_BUILD_LIBRARY", "");
+    in.root_module.addCMacro("DUCKDB_MAIN_LIBRARY", "");
+    in.root_module.addCMacro("DUCKDB", "");
     in.linkLibC();
     in.linkLibCpp();
     in.root_module.pic = true;

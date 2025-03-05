@@ -11,25 +11,26 @@ pub fn build(b: *std.Build) !void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const optimize = b.standardOptimizeOption(.{});
     const libduckdb = b.addSharedLibrary(.{
+        // const libduckdb = b.addStaticLibrary(.{
         .name = "duckdb",
         .target = target,
         .optimize = optimize,
     });
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("extension/httpfs/include"));
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("extension/icu/include"));
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/common"));
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("extension/icu/third_party/icu/i18n"));
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("extension/parquet/include"));
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("third_party/httplib"));
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("third_party/libpg_query/include"));
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("third_party/openssl/include"));
-    libduckdb.addIncludePath(std.Build.LazyPath.relative("third_party/openssl/include"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("third_party/openssl/lib/libcrypto.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("third_party/openssl/lib/libssl.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("third_party/win64/ws2_32.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("third_party/win64/crypt32.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("third_party/win64/cryptui.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("third_party/win64/rstrtmgr.lib"));
+    libduckdb.addIncludePath(std.Build.path(b, "extension/httpfs/include"));
+    libduckdb.addIncludePath(std.Build.path(b, "extension/icu/include"));
+    libduckdb.addIncludePath(std.Build.path(b, "extension/icu/third_party/icu/common"));
+    libduckdb.addIncludePath(std.Build.path(b, "extension/icu/third_party/icu/i18n"));
+    libduckdb.addIncludePath(std.Build.path(b, "extension/parquet/include"));
+    libduckdb.addIncludePath(std.Build.path(b, "third_party/httplib"));
+    libduckdb.addIncludePath(std.Build.path(b, "third_party/libpg_query/include"));
+    libduckdb.addIncludePath(std.Build.path(b, "third_party/openssl/include"));
+    libduckdb.addIncludePath(std.Build.path(b, "third_party/openssl/include"));
+    libduckdb.addObjectFile(std.Build.path(b, "third_party/openssl/lib/libcrypto.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "third_party/openssl/lib/libssl.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "third_party/win64/ws2_32.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "third_party/win64/crypt32.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "third_party/win64/cryptui.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "third_party/win64/rstrtmgr.lib"));
     libduckdb.step.dependOn(&b.addInstallFileWithDir(
         .{ .path = "third_party/openssl/lib/libssl-3-x64.dll" },
         .bin,
@@ -40,35 +41,35 @@ pub fn build(b: *std.Build) !void {
         .bin,
         "libcrypto-3-x64.dll",
     ).step);
-    libduckdb.addCSourceFiles(.{
-        .files = (try iterateFiles(b, "src")).items,
-    });
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/catalog.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/common.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/core_funtions.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/execution.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/function.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/main.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/optimizer.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/parallel.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/parser.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/planner.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/storage.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/transaction.lib"));
-    // libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/verification.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/fastpforlib.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/fmt.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/fsst.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/httpfs_extension.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/hyperloglog.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/icu_extension.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/mbedtls.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/miniz.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/parquet_extension.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/pg_query.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/re2.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/skiplistlib.lib"));
-    libduckdb.addObjectFile(std.Build.LazyPath.relative("zig-out/lib/utf8proc.lib"));
+    // libduckdb.addCSourceFiles(.{
+    //     .files = (try iterateFiles(b, "src")).items,
+    // });
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/catalog.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/common.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/core_funtions.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/execution.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/function.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/main.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/optimizer.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/parallel.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/parser.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/planner.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/storage.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/transaction.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/verification.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/fastpforlib.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/fmt.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/fsst.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/httpfs_extension.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/hyperloglog.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/icu_extension.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/mbedtls.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/miniz.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/parquet_extension.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/pg_query.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/re2.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/skiplistlib.lib"));
+    libduckdb.addObjectFile(std.Build.path(b, "zig-out/lib/utf8proc.lib"));
     _ = try basicSetup(b, libduckdb);
 }
 fn basicSetup(b: *std.Build, in: *std.Build.Step.Compile) !void {
@@ -93,7 +94,7 @@ fn basicSetup(b: *std.Build, in: *std.Build.Step.Compile) !void {
         "third_party/utf8proc/include",
     };
     for (include_dirs) |include_dir| {
-        in.addIncludePath(std.Build.LazyPath.relative(include_dir));
+        in.addIncludePath(std.Build.path(b, include_dir));
     }
     in.defineCMacro("BUILD_HTTPFS_EXTENSION", "TRUE");
     in.defineCMacro("BUILD_ICU_EXTENSION", "TRUE");
