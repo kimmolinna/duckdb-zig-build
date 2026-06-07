@@ -1,5 +1,8 @@
 #if defined(_WIN32) || defined(WIN32)
 #include <io.h>
+#if defined(__MINGW32__)
+#include <unistd.h>
+#endif
 #else
 #include <sys/stat.h>
 #include <sys/types.h>

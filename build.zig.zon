@@ -1,0 +1,12 @@
+.{
+    .fingerprint = 0x2407bb629d98520b,
+    .name = .duckdb_zig_build,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.14.0",
+    .paths = .{
+        "build",
+        "build.zig",
+        "build_shell.zig",
+        "build_win.zig",
+    },
+}

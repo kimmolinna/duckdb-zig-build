@@ -1,0 +1,63 @@
+name: Zig Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'build/**'
+      - 'build*.zig'
+      - 'build.zig.zon'
+      - 'src/**'
+      - 'extension/**'
+      - 'third_party/**'
+      - 'tools/shell/**'
+      - '.github/workflows/ZigBuild.yml'
+  pull_request:
+    paths:
+      - 'build/**'
+      - 'build*.zig'
+      - 'build.zig.zon'
+      - 'src/**'
+      - 'extension/**'
+      - 'third_party/**'
+      - 'tools/shell/**'
+      - '.github/workflows/ZigBuild.yml'
+
+jobs:
+  zig-build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3 clang lld llvm cmake zlib1g-dev
+      - name: Build shared library (minimal)
+        run: zig build -Doptimize=ReleaseFast -Dminimal=true
+      - name: Build shell (minimal)
+        run: zig build --build-file build_shell.zig -Doptimize=ReleaseFast -Dminimal=true
+      - name: Smoke test
+        run: zig-out/bin/duckdb -c "SELECT 1"
+
+  zig-build-windows-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3 clang lld llvm cmake zlib1g-dev
+      - name: Cross-compile Windows DLL (minimal)
+        run: zig build --build-file build_win.zig -Doptimize=ReleaseFast -Dminimal=true -Dtarget=x86_64-windows-gnu -Dmode=dll
+
+  zig-build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: Build shared library (minimal)
+        run: zig build -Doptimize=ReleaseFast -Dminimal=true

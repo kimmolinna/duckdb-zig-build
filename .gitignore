@@ -72,7 +72,8 @@ m4/lt~obsolete.m4
 # Build artifacts
 #==============================================================================#
 #m4/
-build/
+build/**
+!build/*.zig
 duckdb_benchmark_data/
 #*.m4
 *.o
@@ -281,7 +282,7 @@ settings.json
 Makefile.config
 
 # build, distribute, and bins (+ python proto bindings)
-build
+# (CMake artifacts under build/; Zig modules build/*.zig are tracked)
 .build_debug/*
 .build_release/*
 distribute/*
@@ -338,6 +339,8 @@ __nvm
 # Zig files
 zig-out/*
 .zig-cache/*
+zig-generated/
+zig-out/
 
 # .db files
 *.db

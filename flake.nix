@@ -22,22 +22,21 @@
         ];
       };
     in {
-      # nix fmt
       formatter = pkgs.alejandra;
 
-      # nix develop -c $SHELL
       devShells.default = pkgs.mkShell {
         packages = with pkgs;
           [
             cmake
             libxml2
             ninja
-            qemu
             openssl
+            python3
+            qemu
             zlib
-            pkgs.zigpkgs.master
+            pkgs.zigpkgs."0.14.0"
           ]
-          ++ (with llvmPackages_16; [
+          ++ (with llvmPackages_18; [
             clang
             clang-unwrapped
             lld

@@ -1,52 +1,140 @@
-### Building Zig
-Get the required packages for building and create symbolic links::
-```bash
-sudo apt-get install zlib1g zlib1g-dev
-wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key|sudo apt-key add -
-# Fingerprint: 6084 F3CF 814B 57C1 CF12 EFD5 15CF 4D18 AF4F 7421
-sudo apt-get update
-sudo apt-get install clang-16 libclang-16-dev lldb-16 liblldb-16-dev lld-16 llvm-16 libllvm16 lld-16 liblld-16-dev cmake
-sudo ln -s /usr/bin/clang++-16 /usr/bin/c++
-sudo ln -s /usr/bin/llvm-config-16 /usr/bin/llvm-config
-```
-Macbook:
-```bash
-brew install llvm zstd
-brew link llvm --force 
-```
-Get Zig source from `git clone https://github.com/ziglang/zig` and build it:
+# Building DuckDB with Zig
+
+This fork provides a Zig-based alternative to the CMake build. It targets **Zig 0.14+** (tested with Zig 0.17).
+
+## Prerequisites
+
+### Linux (Ubuntu/Debian)
 
 ```bash
-mkdir build
-cd build
-cmake .. -DZIG_STATIC_LLVM=ON -DCMAKE_PREFIX_PATH="$(brew --prefix llvm);$(brew --prefix zstd)"
-make install
+sudo apt-get install python3 clang lld llvm cmake libssl-dev zlib1g-dev
 ```
 
-Add Zig-path to enviromental variables.
+Install Zig from [ziglang.org/download](https://ziglang.org/download/) or via [zvm](https://github.com/jakubboni/zvm).
 
-Get DuckDB source from `git clone https://github.com/kimmolinna/duckdb-zig-build`
+### macOS
 
-Set up an upstream fetch
 ```bash
- git remote -v
- git remote add upstream https://github.com/duckdb/duckdb.git
- git fetch upstream
- git checkout master
- git merge upstream/master
+brew install llvm openssl@3
 ```
-Confirm that the openssl libraries are installed and linked correctly. The following files should be pointing to `libssl.so.3` and `libcrypto.so.3`:
+
+Use `-Dopenssl-prefix=$(brew --prefix openssl@3)` when linking OpenSSL.
+
+## Quick start
 
 ```bash
-libssl.so
-libcrypto.so
+# Shared library (all in-tree CI extensions)
+zig build -Doptimize=ReleaseFast
+
+# Minimal build (core_functions + parquet only)
+zig build -Doptimize=ReleaseFast -Dminimal=true
+
+# DuckDB CLI
+zig build --build-file build_shell.zig -Doptimize=ReleaseFast
+
+# Windows cross-compile (DLL, default)
+zig build --build-file build_win.zig -Doptimize=ReleaseFast -Dtarget=x86_64-windows-gnu
+
+# Windows static libs (duckdb_static + extensions)
+zig build --build-file build_win.zig -Doptimize=ReleaseFast -Dtarget=x86_64-windows-gnu -Dmode=libs
+
+# Windows cross-compile (CLI)
+zig build --build-file build_win.zig -Doptimize=ReleaseFast -Dtarget=x86_64-windows-gnu -Dmode=shell
+
+# Faster CI-style minimal Windows build
+zig build --build-file build_win.zig -Doptimize=ReleaseFast -Dminimal=true -Dtarget=x86_64-windows-gnu -Dmode=dll
 ```
-And then you are ready to build duckdb
+
+Artifacts install to `zig-out/`.
+
+## Build options
+
+| Option | Description |
+|--------|-------------|
+| `-Doptimize=ReleaseFast` | Optimized release build |
+| `-Dminimal=true` | Only `core_functions` and `parquet` extensions |
+| `-Dopenssl-prefix=PATH` | OpenSSL prefix on macOS |
+| `-Dlink-openssl=true` | Link system OpenSSL (optional; httpfs loads at runtime) |
+| `-Dmode=libs\|dll\|shell` | Windows build mode (`build_win.zig`) |
+
+## Syncing with upstream
+
 ```bash
-zig build -Doptimize=ReleaseFast # using build.zig
-zig build --build-file build_shell.zig -Doptimize=ReleaseFast  # define build-file 
-zig build --build-file build_shell.zig -Doptimize=ReleaseFast -Dtarget=x86_64-windows-gnu
-zig build --build-file build_libraries_win.zig -Doptimize=ReleaseFast # build libraries for Windows
-zig build --build-file build_dynamic_library_win.zig -Doptimize=ReleaseFast # build dynamic library for Windows
-zig build --build-file build_shell_win.zig -Doptimize=ReleaseFast # build shell for Windows
+git fetch upstream --tags
+git merge upstream/main
+```
+
+Resolve conflicts while preserving Zig-specific files: `build*.zig`, `build/`, `README_ZIG.md`, `flake.nix`.
+
+## Extensions
+
+The default Zig build includes the same in-tree extensions as upstream CI:
+
+- `autocomplete`, `core_functions`, `icu`, `json`, `parquet`, `tpcds`, `tpch`
+
+`httpfs` is **out-of-tree** in modern DuckDB and is loaded via autoload at runtime, not compiled in.
+
+## Testing
+
+The Zig build does **not** compile DuckDB's full `test/` suite. Upstream tests are a single `unittest` binary (Catch2 + SQLLogic) that runs thousands of `.test` files — that infrastructure is owned by CMake/Make.
+
+### Smoke tests (Zig build validation)
+
+After building, verify the CLI with a few quick queries:
+
+```bash
+zig build --build-file build_shell.zig -Doptimize=ReleaseFast
+
+./zig-out/bin/duckdb -c "SELECT 1"
+./zig-out/bin/duckdb -c "SELECT version()"
+./zig-out/bin/duckdb -c "SELECT json_extract('{\"a\":42}', '$.a')"
+
+# Parquet roundtrip
+./zig-out/bin/duckdb -c "
+  COPY (SELECT 1 AS id, 'hello' AS msg) TO '/tmp/smoke.parquet' (FORMAT parquet);
+  SELECT * FROM read_parquet('/tmp/smoke.parquet');
+"
+
+# Loaded extensions (full build)
+./zig-out/bin/duckdb -c "SELECT extension_name FROM duckdb_extensions() WHERE loaded ORDER BY 1"
+```
+
+Minimal build (`-Dminimal=true`) should load only `core_functions` and `parquet`; `json_extract` should suggest loading the json extension.
+
+CI runs a subset of this via `.github/workflows/ZigBuild.yml` (`SELECT 1` after a minimal shell build).
+
+### Full regression (CMake)
+
+For upstream-parity testing, use the standard DuckDB test runner:
+
+```bash
+make release
+make unittest_release
+
+# Or run a single SQLLogic file:
+build/release/test/unittest test/sql/copy/parquet/parquet_basic.test
+```
+
+No `build_unittest.zig` is provided — duplicating the entire `test/` tree in Zig would be high maintenance with little benefit for this fork.
+
+## Nix development shell
+
+```bash
+nix develop -c $SHELL
+zig build -Doptimize=ReleaseFast
+```
+
+## Project layout
+
+```
+build.zig           # libduckdb shared library
+build_shell.zig     # duckdb CLI
+build_win.zig       # Windows cross-compile
+build/
+  duckdb.zig        # shared helpers
+  extensions.zig    # extension definitions
+  third_party.zig   # vendored libraries
+  openssl.zig       # platform OpenSSL linking
+  duckdb_lib.zig    # duckdb static/shared library logic
+  shell.zig         # shared shell/linenoise setup
 ```

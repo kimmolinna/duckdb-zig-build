@@ -46,6 +46,10 @@ For development, DuckDB requires [CMake](https://cmake.org), Python 3 and a `C++
 
 Please also refer to our [Build Guide](https://duckdb.org/docs/current/dev/building/overview) and [Contribution Guide](CONTRIBUTING.md).
 
+### Building with Zig
+
+This fork also supports building with Zig. See [README_ZIG.md](README_ZIG.md) for instructions.
+
 ## Support
 
 See the [Support Options](https://ducklabs.com/support/) page and the dedicated [`endoflife.date`](https://endoflife.date/duckdb) page.
