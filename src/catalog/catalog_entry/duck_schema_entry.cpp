@@ -2,6 +2,7 @@
 
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/collate_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/coordinate_system_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -14,6 +15,8 @@
 #include "duckdb/catalog/catalog_entry/table_macro_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/window_function_catalog_entry.hpp"
+#include "duckdb/catalog/default/default_coordinate_systems.hpp"
 #include "duckdb/catalog/default/default_functions.hpp"
 #include "duckdb/catalog/default/default_table_functions.hpp"
 #include "duckdb/catalog/default/default_types.hpp"
@@ -23,6 +26,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
+#include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_collation_info.hpp"
 #include "duckdb/parser/parsed_data/create_copy_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
@@ -34,7 +38,6 @@
 #include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
-#include "duckdb/planner/constraints/bound_foreign_key_constraint.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
@@ -67,25 +70,17 @@ static void FindForeignKeyInformation(TableCatalogEntry &table, AlterForeignKeyT
 	}
 }
 
-static void LazyLoadIndexes(ClientContext &context, CatalogEntry &entry) {
-	if (entry.type == CatalogType::TABLE_ENTRY) {
-		auto &table_entry = entry.Cast<TableCatalogEntry>();
-		table_entry.GetStorage().InitializeIndexes(context);
-	} else if (entry.type == CatalogType::INDEX_ENTRY) {
-		auto &index_entry = entry.Cast<IndexCatalogEntry>();
-		auto &table_entry = Catalog::GetEntry(context, CatalogType::TABLE_ENTRY, index_entry.catalog.GetName(),
-		                                      index_entry.GetSchemaName(), index_entry.GetTableName())
-		                        .Cast<TableCatalogEntry>();
-		table_entry.GetStorage().InitializeIndexes(context);
-	}
-}
-
 DuckSchemaEntry::DuckSchemaEntry(Catalog &catalog, CreateSchemaInfo &info)
-    : SchemaCatalogEntry(catalog, info), tables(catalog, make_uniq<DefaultViewGenerator>(catalog, *this)),
-      indexes(catalog), table_functions(catalog, make_uniq<DefaultTableFunctionGenerator>(catalog, *this)),
+    : SchemaCatalogEntry(catalog, info),
+      tables(catalog, catalog.IsSystemCatalog() ? make_uniq<DefaultViewGenerator>(catalog, *this) : nullptr),
+      indexes(catalog),
+      table_functions(catalog,
+                      catalog.IsSystemCatalog() ? make_uniq<DefaultTableFunctionGenerator>(catalog, *this) : nullptr),
       copy_functions(catalog), pragma_functions(catalog),
-      functions(catalog, make_uniq<DefaultFunctionGenerator>(catalog, *this)), sequences(catalog), collations(catalog),
-      types(catalog, make_uniq<DefaultTypeGenerator>(catalog, *this)) {
+      functions(catalog, catalog.IsSystemCatalog() ? make_uniq<DefaultFunctionGenerator>(catalog, *this) : nullptr),
+      sequences(catalog), collations(catalog), types(catalog, make_uniq<DefaultTypeGenerator>(catalog, *this)),
+      coordinate_systems(
+          catalog, catalog.IsSystemCatalog() ? make_uniq<DefaultCoordinateSystemGenerator>(catalog, *this) : nullptr) {
 }
 
 unique_ptr<CatalogEntry> DuckSchemaEntry::Copy(ClientContext &context) const {
@@ -145,7 +140,9 @@ optional_ptr<CatalogEntry> DuckSchemaEntry::AddEntryInternal(CatalogTransaction 
 	if (!set.CreateEntry(transaction, entry_name, std::move(entry), dependencies)) {
 		// entry already exists!
 		if (on_conflict == OnCreateConflict::ERROR_ON_CONFLICT) {
-			throw CatalogException::EntryAlreadyExists(entry_type, entry_name);
+			auto existing_entry = set.GetEntry(transaction, entry_name);
+			auto existing_type = existing_entry ? existing_entry->type : entry_type;
+			throw CatalogException::EntryAlreadyExists(existing_type, entry_name);
 		} else {
 			return nullptr;
 		}
@@ -217,6 +214,12 @@ optional_ptr<CatalogEntry> DuckSchemaEntry::CreateFunction(CatalogTransaction tr
 		function = make_uniq_base<StandardEntry, AggregateFunctionCatalogEntry>(
 		    catalog, *this, info.Cast<CreateAggregateFunctionInfo>());
 		break;
+	case CatalogType::WINDOW_FUNCTION_ENTRY:
+		D_ASSERT(info.type == CatalogType::WINDOW_FUNCTION_ENTRY);
+		// create a window function
+		function = make_uniq_base<StandardEntry, WindowFunctionCatalogEntry>(catalog, *this,
+		                                                                     info.Cast<CreateWindowFunctionInfo>());
+		break;
 	default:
 		throw InternalException("Unknown function type \"%s\"", CatalogTypeToString(info.type));
 	}
@@ -265,6 +268,13 @@ optional_ptr<CatalogEntry> DuckSchemaEntry::CreateCollation(CatalogTransaction t
 	auto collation = make_uniq<CollateCatalogEntry>(catalog, *this, info);
 	collation->internal = info.internal;
 	return AddEntry(transaction, std::move(collation), info.on_conflict);
+}
+
+optional_ptr<CatalogEntry> DuckSchemaEntry::CreateCoordinateSystem(CatalogTransaction transaction,
+                                                                   CreateCoordinateSystemInfo &info) {
+	auto coordinate_system = make_uniq<CoordinateSystemCatalogEntry>(catalog, *this, info);
+	coordinate_system->internal = info.internal;
+	return AddEntry(transaction, std::move(coordinate_system), info.on_conflict);
 }
 
 optional_ptr<CatalogEntry> DuckSchemaEntry::CreateTableFunction(CatalogTransaction transaction,
@@ -316,6 +326,9 @@ void DuckSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEnt
 }
 
 void DuckSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
+	if (info.type == CatalogType::TRIGGER_ENTRY) {
+		throw InternalException("Triggers should be dropped through their table, not through the schema");
+	}
 	auto &set = GetCatalogSet(info.type);
 
 	// first find the entry
@@ -328,9 +341,6 @@ void DuckSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		throw CatalogException("Existing object %s is of type %s, trying to drop type %s", info.name,
 		                       CatalogTypeToString(existing_entry->type), CatalogTypeToString(info.type));
 	}
-
-	// if this is a index or table with indexes, initialize any unknown index instances
-	LazyLoadIndexes(context, *existing_entry);
 
 	vector<unique_ptr<AlterForeignKeyInfo>> fk_arrays;
 	if (existing_entry->type == CatalogType::TABLE_ENTRY) {
@@ -364,19 +374,19 @@ void DuckSchemaEntry::OnDropEntry(CatalogTransaction transaction, CatalogEntry &
 	local_storage.DropTable(table_entry.GetStorage());
 }
 
-optional_ptr<CatalogEntry> DuckSchemaEntry::GetEntry(CatalogTransaction transaction, CatalogType type,
-                                                     const string &name) {
-	return GetCatalogSet(type).GetEntry(transaction, name);
+optional_ptr<CatalogEntry> DuckSchemaEntry::LookupEntry(CatalogTransaction transaction,
+                                                        const EntryLookupInfo &lookup_info) {
+	return GetCatalogSet(lookup_info.GetCatalogType()).GetEntry(transaction, lookup_info.GetEntryName());
 }
 
-CatalogSet::EntryLookup DuckSchemaEntry::GetEntryDetailed(CatalogTransaction transaction, CatalogType type,
-                                                          const string &name) {
-	return GetCatalogSet(type).GetEntryDetailed(transaction, name);
+CatalogSet::EntryLookup DuckSchemaEntry::LookupEntryDetailed(CatalogTransaction transaction,
+                                                             const EntryLookupInfo &lookup_info) {
+	return GetCatalogSet(lookup_info.GetCatalogType()).GetEntryDetailed(transaction, lookup_info.GetEntryName());
 }
 
-SimilarCatalogEntry DuckSchemaEntry::GetSimilarEntry(CatalogTransaction transaction, CatalogType type,
-                                                     const string &name) {
-	return GetCatalogSet(type).SimilarEntry(transaction, name);
+SimilarCatalogEntry DuckSchemaEntry::GetSimilarEntry(CatalogTransaction transaction,
+                                                     const EntryLookupInfo &lookup_info) {
+	return GetCatalogSet(lookup_info.GetCatalogType()).SimilarEntry(transaction, lookup_info.GetEntryName());
 }
 
 CatalogSet &DuckSchemaEntry::GetCatalogSet(CatalogType type) {
@@ -396,15 +406,18 @@ CatalogSet &DuckSchemaEntry::GetCatalogSet(CatalogType type) {
 	case CatalogType::AGGREGATE_FUNCTION_ENTRY:
 	case CatalogType::SCALAR_FUNCTION_ENTRY:
 	case CatalogType::MACRO_ENTRY:
+	case CatalogType::WINDOW_FUNCTION_ENTRY:
 		return functions;
 	case CatalogType::SEQUENCE_ENTRY:
 		return sequences;
 	case CatalogType::COLLATION_ENTRY:
 		return collations;
+	case CatalogType::COORDINATE_SYSTEM_ENTRY:
+		return coordinate_systems;
 	case CatalogType::TYPE_ENTRY:
 		return types;
 	default:
-		throw InternalException("Unsupported catalog type in schema");
+		throw InternalException({{"catalog_type", CatalogTypeToString(type)}}, "Unsupported catalog type in schema");
 	}
 }
 

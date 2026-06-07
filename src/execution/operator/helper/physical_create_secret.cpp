@@ -5,15 +5,14 @@
 
 namespace duckdb {
 
-SourceResultType PhysicalCreateSecret::GetData(ExecutionContext &context, DataChunk &chunk,
-                                               OperatorSourceInput &input) const {
+SourceResultType PhysicalCreateSecret::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                       OperatorSourceInput &input) const {
 	auto &client = context.client;
 	auto &secret_manager = SecretManager::Get(client);
 
-	secret_manager.CreateSecret(client, info);
+	secret_manager.CreateSecret(client, create_input);
 
-	chunk.SetValue(0, 0, true);
-	chunk.SetCardinality(1);
+	chunk.data[0].Append(Value::BOOLEAN(true));
 
 	return SourceResultType::FINISHED;
 }

@@ -9,11 +9,14 @@
 
 namespace duckdb {
 
+constexpr const char *TypeCatalogEntry::Name;
+
 TypeCatalogEntry::TypeCatalogEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTypeInfo &info)
     : StandardEntry(CatalogType::TYPE_ENTRY, schema, catalog, info.name), user_type(info.type),
       bind_function(info.bind_function) {
 	this->temporary = info.temporary;
 	this->internal = info.internal;
+	this->extension_name = info.extension_name;
 	this->dependencies = info.dependencies;
 	this->comment = info.comment;
 	this->tags = info.tags;
@@ -32,6 +35,7 @@ unique_ptr<CreateInfo> TypeCatalogEntry::GetInfo() const {
 	result->schema = schema.name;
 	result->name = name;
 	result->type = user_type;
+	result->extension_name = extension_name;
 	result->dependencies = dependencies;
 	result->comment = comment;
 	result->tags = tags;
@@ -40,9 +44,9 @@ unique_ptr<CreateInfo> TypeCatalogEntry::GetInfo() const {
 }
 
 string TypeCatalogEntry::ToSQL() const {
-	std::stringstream ss;
+	duckdb::stringstream ss;
 	ss << "CREATE TYPE ";
-	ss << KeywordHelper::WriteOptionallyQuoted(name);
+	ss << SQLIdentifier(name);
 	ss << " AS ";
 
 	auto user_type_copy = user_type;

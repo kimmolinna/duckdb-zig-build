@@ -10,7 +10,9 @@
 
 namespace duckdb {
 
-static hugeint_t GetPreviousPowerOfTen(hugeint_t input) {
+namespace {
+
+hugeint_t GetPreviousPowerOfTen(hugeint_t input) {
 	hugeint_t power_of_ten = 1;
 	while (power_of_ten < input) {
 		power_of_ten *= 10;
@@ -60,7 +62,7 @@ hugeint_t MakeNumberNice(hugeint_t input, hugeint_t step, NiceRounding rounding)
 	}
 }
 
-static double GetPreviousPowerOfTen(double input) {
+double GetPreviousPowerOfTen(double input) {
 	double power_of_ten = 1;
 	if (input < 1) {
 		while (power_of_ten > input) {
@@ -403,12 +405,13 @@ struct EquiWidthBinsTimestamp {
 	}
 };
 
-unique_ptr<FunctionData> BindEquiWidthFunction(ClientContext &, ScalarFunction &bound_function,
-                                               vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> BindEquiWidthFunction(BindScalarFunctionInput &input) {
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
 	// while internally the bins are computed over a unified type
 	// the equi_width_bins function returns the same type as the input MAX
 	LogicalType child_type;
-	switch (arguments[1]->return_type.id()) {
+	switch (arguments[1]->GetReturnType().id()) {
 	case LogicalTypeId::UNKNOWN:
 	case LogicalTypeId::SQLNULL:
 		return nullptr;
@@ -417,25 +420,25 @@ unique_ptr<FunctionData> BindEquiWidthFunction(ClientContext &, ScalarFunction &
 		child_type = LogicalType::DOUBLE;
 		break;
 	default:
-		child_type = arguments[1]->return_type;
+		child_type = arguments[1]->GetReturnType();
 		break;
 	}
-	bound_function.return_type = LogicalType::LIST(child_type);
+	bound_function.SetReturnType(LogicalType::LIST(child_type));
 	return nullptr;
 }
 
 template <class T, class OP>
-static void EquiWidthBinFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+void EquiWidthBinFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	static constexpr int64_t MAX_BIN_COUNT = 1000000;
-	auto &min_arg = args.data[0];
-	auto &max_arg = args.data[1];
-	auto &bin_count = args.data[2];
-	auto &nice_rounding = args.data[3];
+	const auto &min_arg = args.data[0];
+	const auto &max_arg = args.data[1];
+	const auto &bin_count = args.data[2];
+	const auto &nice_rounding = args.data[3];
 
 	Vector intermediate_result(LogicalType::LIST(OP::LOGICAL_TYPE));
 	GenericExecutor::ExecuteQuaternary<PrimitiveType<T>, PrimitiveType<T>, PrimitiveType<int64_t>, PrimitiveType<bool>,
 	                                   GenericListType<PrimitiveType<T>>>(
-	    min_arg, max_arg, bin_count, nice_rounding, intermediate_result, args.size(),
+	    min_arg, max_arg, bin_count, nice_rounding, intermediate_result,
 	    [&](PrimitiveType<T> min_p, PrimitiveType<T> max_p, PrimitiveType<int64_t> bins_p,
 	        PrimitiveType<bool> nice_rounding_p) {
 		    if (max_p.val < min_p.val) {
@@ -467,18 +470,20 @@ static void EquiWidthBinFunction(DataChunk &args, ExpressionState &state, Vector
 	VectorOperations::DefaultCast(intermediate_result, result, args.size());
 }
 
-static void UnsupportedEquiWidth(DataChunk &args, ExpressionState &state, Vector &) {
+void UnsupportedEquiWidth(DataChunk &args, ExpressionState &state, Vector &) {
 	throw BinderException(state.expr, "Unsupported type \"%s\" for equi_width_bins", args.data[0].GetType());
 }
 
-void EquiWidthBinSerialize(Serializer &, const optional_ptr<FunctionData>, const ScalarFunction &) {
+void EquiWidthBinSerialize(Serializer &, const optional_ptr<FunctionData>, const BoundScalarFunction &) {
 	return;
 }
 
-unique_ptr<FunctionData> EquiWidthBinDeserialize(Deserializer &deserializer, ScalarFunction &function) {
-	function.return_type = deserializer.Get<const LogicalType &>();
+unique_ptr<FunctionData> EquiWidthBinDeserialize(Deserializer &deserializer, BoundScalarFunction &function) {
+	function.SetReturnType(deserializer.Get<const LogicalType &>());
 	return nullptr;
 }
+
+} // namespace
 
 ScalarFunctionSet EquiWidthBinsFun::GetFunctions() {
 	ScalarFunctionSet functions("equi_width_bins");
@@ -498,9 +503,9 @@ ScalarFunctionSet EquiWidthBinsFun::GetFunctions() {
 	                    LogicalType::BIGINT, LogicalType::BOOLEAN},
 	                   LogicalType::LIST(LogicalType::ANY), UnsupportedEquiWidth, BindEquiWidthFunction));
 	for (auto &function : functions.functions) {
-		function.serialize = EquiWidthBinSerialize;
-		function.deserialize = EquiWidthBinDeserialize;
-		BaseScalarFunction::SetReturnsError(function);
+		function.SetSerializeCallback(EquiWidthBinSerialize);
+		function.SetDeserializeCallback(EquiWidthBinDeserialize);
+		function.SetFallible();
 	}
 	return functions;
 }

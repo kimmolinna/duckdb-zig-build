@@ -8,6 +8,9 @@
 #ifndef FMT_CORE_H_
 #define FMT_CORE_H_
 
+#include "duckdb/common/hugeint.hpp"
+#include "duckdb/common/uhugeint.hpp"
+
 #include <cstdio>  // std::FILE
 #include <cstring>
 #include <iterator>
@@ -223,26 +226,25 @@ template <typename... Ts> struct void_t_impl { using type = void; };
 #endif
 
 #if defined(FMT_USE_STRING_VIEW)
-template <typename Char> using std_string_view = std::basic_string_view<Char>;
-#elif defined(FMT_USE_EXPERIMENTAL_STRING_VIEW)
+// Undefine to avoid deprecation warnings from libc++ for non-standard char types
+#undef FMT_USE_STRING_VIEW
+#endif
+#if defined(FMT_USE_EXPERIMENTAL_STRING_VIEW)
 template <typename Char>
 using std_string_view = std::experimental::basic_string_view<Char>;
 #else
 template <typename T> struct std_string_view {};
 #endif
 
+using int128_t = duckdb::hugeint_t;
+using uint128_t = duckdb::uhugeint_t;
+
 #ifdef FMT_USE_INT128
 // Do nothing.
 #elif defined(__SIZEOF_INT128__)
 #  define FMT_USE_INT128 1
-using int128_t = __int128_t;
-using uint128_t = __uint128_t;
 #else
 #  define FMT_USE_INT128 0
-#endif
-#if !FMT_USE_INT128
-struct int128_t {};
-struct uint128_t {};
 #endif
 
 // Casts a nonnegative integer to unsigned.
@@ -1004,16 +1006,10 @@ FMT_CONSTEXPR auto visit_format_arg(Visitor&& vis,
     return vis(arg.value_.long_long_value);
   case internal::ulong_long_type:
     return vis(arg.value_.ulong_long_value);
-#if FMT_USE_INT128
   case internal::int128_type:
     return vis(arg.value_.int128_value);
   case internal::uint128_type:
     return vis(arg.value_.uint128_value);
-#else
-  case internal::int128_type:
-  case internal::uint128_type:
-    break;
-#endif
   case internal::bool_type:
     return vis(arg.value_.bool_value);
   case internal::char_type:

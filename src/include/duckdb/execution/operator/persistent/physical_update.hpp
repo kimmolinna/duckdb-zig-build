@@ -14,6 +14,7 @@
 
 namespace duckdb {
 class DataTable;
+class DuckTableEntry;
 
 //! Physically update data in a table
 class PhysicalUpdate : public PhysicalOperator {
@@ -21,12 +22,12 @@ public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::UPDATE;
 
 public:
-	PhysicalUpdate(vector<LogicalType> types, TableCatalogEntry &tableref, DataTable &table,
+	PhysicalUpdate(PhysicalPlan &physical_plan, vector<LogicalType> types, DuckTableEntry &tableref, DataTable &table,
 	               vector<PhysicalIndex> columns, vector<unique_ptr<Expression>> expressions,
 	               vector<unique_ptr<Expression>> bound_defaults, vector<unique_ptr<BoundConstraint>> bound_constraints,
 	               idx_t estimated_cardinality, bool return_chunk);
 
-	TableCatalogEntry &tableref;
+	DuckTableEntry &tableref;
 	DataTable &table;
 	vector<PhysicalIndex> columns;
 	vector<unique_ptr<Expression>> expressions;
@@ -41,7 +42,8 @@ public:
 public:
 	// Source interface
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
 
 	bool IsSource() const override {
 		return true;

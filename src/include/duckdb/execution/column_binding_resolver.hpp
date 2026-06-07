@@ -22,13 +22,14 @@ public:
 	explicit ColumnBindingResolver(bool verify_only = false);
 
 	void VisitOperator(LogicalOperator &op) override;
-	static void Verify(LogicalOperator &op);
+	static void Verify(ClientContext &context, LogicalOperator &op);
 
 protected:
 	vector<ColumnBinding> bindings;
+	vector<LogicalType> types;
 	bool verify_only;
 
 	unique_ptr<Expression> VisitReplace(BoundColumnRefExpression &expr, unique_ptr<Expression> *expr_ptr) override;
-	static unordered_set<idx_t> VerifyInternal(LogicalOperator &op);
+	static unordered_set<TableIndex> VerifyInternal(LogicalOperator &op);
 };
 } // namespace duckdb

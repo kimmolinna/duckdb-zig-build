@@ -2,9 +2,8 @@
 #include "duckdb/function/table/summary.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/function/function_set.hpp"
-#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/operator/add.hpp"
-#include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/operator/subtract.hpp"
 
 namespace duckdb {
 
@@ -29,7 +28,7 @@ static void GetParameters(int64_t values[], idx_t value_count, hugeint_t &start,
 }
 
 struct RangeFunctionBindData : public TableFunctionData {
-	explicit RangeFunctionBindData(const vector<Value> &inputs) : cardinality(0) {
+	explicit RangeFunctionBindData(const vector<Value> &inputs, bool generate_series) : cardinality(0) {
 		int64_t values[3];
 		for (idx_t i = 0; i < inputs.size(); i++) {
 			if (inputs[i].IsNull()) {
@@ -41,7 +40,15 @@ struct RangeFunctionBindData : public TableFunctionData {
 		hugeint_t end;
 		hugeint_t increment;
 		GetParameters(values, inputs.size(), start, end, increment);
+		if (generate_series) {
+			// generate_series has inclusive bounds on the RHS
+			end += 1;
+		}
+
 		cardinality = Hugeint::Cast<idx_t>((end - start) / increment);
+		if ((end - start) % increment != 0) {
+			cardinality += 1;
+		}
 	}
 
 	idx_t cardinality;
@@ -59,7 +66,7 @@ static unique_ptr<FunctionData> RangeFunctionBind(ClientContext &context, TableF
 	if (input.inputs.empty() || input.inputs.size() > 3) {
 		return nullptr;
 	}
-	return make_uniq<RangeFunctionBindData>(input.inputs);
+	return make_uniq<RangeFunctionBindData>(input.inputs, GENERATE_SERIES);
 }
 
 struct RangeFunctionLocalState : public LocalTableFunctionState {
@@ -105,6 +112,7 @@ static void GenerateRangeParameters(DataChunk &input, idx_t row_id, RangeFunctio
 	if (result.increment == 0) {
 		throw BinderException("interval cannot be 0!");
 	}
+	result.empty_range = false;
 	if (result.start > result.end && result.increment > 0) {
 		result.empty_range = true;
 	}
@@ -140,7 +148,6 @@ static OperatorResultType RangeFunction(ExecutionContext &context, TableFunction
 		}
 		if (state.empty_range) {
 			// empty range
-			output.SetCardinality(0);
 			state.current_input_row++;
 			state.initialized_row = false;
 			return OperatorResultType::HAVE_MORE_OUTPUT;
@@ -162,7 +169,6 @@ static OperatorResultType RangeFunction(ExecutionContext &context, TableFunction
 		output.data[0].Sequence(current_value_i64, Hugeint::Cast<int64_t>(increment), remaining);
 		// increment the index pointer by the remaining count
 		state.current_idx += remaining;
-		output.SetCardinality(remaining);
 		if (remaining == 0) {
 			// move to next row
 			state.current_input_row++;
@@ -184,6 +190,36 @@ unique_ptr<NodeStatistics> RangeCardinality(ClientContext &context, const Functi
 //===--------------------------------------------------------------------===//
 // Range (timestamp)
 //===--------------------------------------------------------------------===//
+struct RangeDateTimeBindData : public TableFunctionData {
+	explicit RangeDateTimeBindData(const vector<Value> &inputs) : cardinality(0) {
+		timestamp_t bounds[2];
+		interval_t step;
+		for (idx_t i = 0; i < inputs.size(); i++) {
+			if (inputs[i].IsNull()) {
+				return;
+			}
+			if (i >= 2) {
+				step = inputs[i].GetValue<interval_t>();
+			} else {
+				bounds[i] = inputs[i].GetValue<timestamp_t>();
+			}
+		}
+		// Estimate cardinality using micros.
+		int64_t increment = 0;
+		if (!Interval::TryGetMicro(step, increment) || !increment) {
+			return;
+		}
+		int64_t delta = 0;
+		if (!TrySubtractOperator::Operation(bounds[1].value, bounds[0].value, delta)) {
+			return;
+		}
+
+		cardinality = idx_t(delta / increment);
+	}
+
+	idx_t cardinality;
+};
+
 template <bool GENERATE_SERIES>
 static unique_ptr<FunctionData> RangeDateTimeBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<string> &names) {
@@ -193,7 +229,18 @@ static unique_ptr<FunctionData> RangeDateTimeBind(ClientContext &context, TableF
 	} else {
 		names.emplace_back("range");
 	}
-	return nullptr;
+	if (input.inputs.size() != 3) {
+		return nullptr;
+	}
+	return make_uniq<RangeDateTimeBindData>(input.inputs);
+}
+
+unique_ptr<NodeStatistics> RangeDateTimeCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	if (!bind_data_p) {
+		return nullptr;
+	}
+	auto &bind_data = bind_data_p->Cast<RangeDateTimeBindData>();
+	return make_uniq<NodeStatistics>(bind_data.cardinality, bind_data.cardinality);
 }
 
 struct RangeDateTimeLocalState : public LocalTableFunctionState {
@@ -249,7 +296,7 @@ static void GenerateRangeDateTimeParameters(DataChunk &input, idx_t row_id, Rang
 	result.increment = FlatVector::GetValue<interval_t>(input.data[2], row_id);
 
 	// Infinities either cause errors or infinite loops, so just ban them
-	if (!Timestamp::IsFinite(result.start) || !Timestamp::IsFinite(result.end)) {
+	if (!result.start.IsFinite() || !result.end.IsFinite()) {
 		throw BinderException("RANGE with infinite bounds is not supported");
 	}
 
@@ -299,13 +346,12 @@ static OperatorResultType RangeDateTimeFunction(ExecutionContext &context, Table
 		}
 		if (state.empty_range) {
 			// empty range
-			output.SetCardinality(0);
 			state.current_input_row++;
 			state.initialized_row = false;
 			return OperatorResultType::HAVE_MORE_OUTPUT;
 		}
 		idx_t size = 0;
-		auto data = FlatVector::GetData<timestamp_t>(output.data[0]);
+		auto result_data = FlatVector::ScatterWriter<timestamp_t>(output.data[0]);
 		while (true) {
 			if (state.Finished(state.current_state)) {
 				break;
@@ -313,7 +359,8 @@ static OperatorResultType RangeDateTimeFunction(ExecutionContext &context, Table
 			if (size >= STANDARD_VECTOR_SIZE) {
 				break;
 			}
-			data[size++] = state.current_state;
+			result_data[size] = state.current_state;
+			size++;
 			state.current_state =
 			    AddOperator::Operation<timestamp_t, interval_t, timestamp_t>(state.current_state, state.increment);
 		}
@@ -323,7 +370,7 @@ static OperatorResultType RangeDateTimeFunction(ExecutionContext &context, Table
 			state.initialized_row = false;
 			continue;
 		}
-		output.SetCardinality(size);
+		output.SetChildCardinality(size);
 		return OperatorResultType::HAVE_MORE_OUTPUT;
 	}
 }
@@ -335,33 +382,39 @@ void RangeTableFunction::RegisterFunction(BuiltinFunctions &set) {
 	                             RangeFunctionLocalInit);
 	range_function.in_out_function = RangeFunction<false>;
 	range_function.cardinality = RangeCardinality;
+	range_function.parallelism = TableFunctionParallelism::FORCE_SINGLE_THREADED;
 
 	// single argument range: (end) - implicit start = 0 and increment = 1
 	range.AddFunction(range_function);
 	// two arguments range: (start, end) - implicit increment = 1
-	range_function.arguments = {LogicalType::BIGINT, LogicalType::BIGINT};
+	range_function.GetArguments() = {LogicalType::BIGINT, LogicalType::BIGINT};
 	range.AddFunction(range_function);
 	// three arguments range: (start, end, increment)
-	range_function.arguments = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
+	range_function.GetArguments() = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
 	range.AddFunction(range_function);
 	TableFunction range_in_out({LogicalType::TIMESTAMP, LogicalType::TIMESTAMP, LogicalType::INTERVAL}, nullptr,
 	                           RangeDateTimeBind<false>, nullptr, RangeDateTimeLocalInit);
 	range_in_out.in_out_function = RangeDateTimeFunction<false>;
+	range_in_out.cardinality = RangeDateTimeCardinality;
+	range_in_out.parallelism = TableFunctionParallelism::FORCE_SINGLE_THREADED;
 	range.AddFunction(range_in_out);
 	set.AddFunction(range);
 	// generate_series: similar to range, but inclusive instead of exclusive bounds on the RHS
 	TableFunctionSet generate_series("generate_series");
 	range_function.bind = RangeFunctionBind<true>;
 	range_function.in_out_function = RangeFunction<true>;
-	range_function.arguments = {LogicalType::BIGINT};
+	range_function.return_type = TableFunctionReturnType::SET_RETURNING_FUNCTION;
+	range_function.GetArguments() = {LogicalType::BIGINT};
 	generate_series.AddFunction(range_function);
-	range_function.arguments = {LogicalType::BIGINT, LogicalType::BIGINT};
+	range_function.GetArguments() = {LogicalType::BIGINT, LogicalType::BIGINT};
 	generate_series.AddFunction(range_function);
-	range_function.arguments = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
+	range_function.GetArguments() = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
 	generate_series.AddFunction(range_function);
 	TableFunction generate_series_in_out({LogicalType::TIMESTAMP, LogicalType::TIMESTAMP, LogicalType::INTERVAL},
 	                                     nullptr, RangeDateTimeBind<true>, nullptr, RangeDateTimeLocalInit);
 	generate_series_in_out.in_out_function = RangeDateTimeFunction<true>;
+	generate_series_in_out.parallelism = TableFunctionParallelism::FORCE_SINGLE_THREADED;
+	generate_series_in_out.return_type = TableFunctionReturnType::SET_RETURNING_FUNCTION;
 	generate_series.AddFunction(generate_series_in_out);
 	set.AddFunction(generate_series);
 }

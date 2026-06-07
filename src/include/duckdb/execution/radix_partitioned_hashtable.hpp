@@ -20,7 +20,8 @@ struct AggregatePartition;
 
 class RadixPartitionedHashTable {
 public:
-	RadixPartitionedHashTable(GroupingSet &grouping_set, const GroupedAggregateData &op);
+	RadixPartitionedHashTable(GroupingSet &grouping_set, const GroupedAggregateData &op,
+	                          TupleDataValidityType group_validity);
 	unique_ptr<GroupedAggregateHashTable> CreateHT(ClientContext &context, const idx_t capacity,
 	                                               const idx_t radix_bits) const;
 
@@ -32,11 +33,15 @@ public:
 	vector<LogicalType> group_types;
 	//! The GROUPING values that belong to this hash table
 	vector<Value> grouping_values;
+	//! Whether there are no NULLs in the groups
+	const TupleDataValidityType group_validity;
 
 public:
 	//! Sink Interface
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const;
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const;
+	void ResetGlobalSinkState(ClientContext &context, GlobalSinkState &gstate) const;
+	void ResetLocalSinkState(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate) const;
 
 	void Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, DataChunk &aggregate_input_chunk,
 	          const unsafe_vector<idx_t> &filter) const;
@@ -47,12 +52,15 @@ public:
 	//! Source interface
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const;
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context) const;
+	void ResetGlobalSourceState(ClientContext &context, GlobalSourceState &gstate) const;
+	void ResetLocalSourceState(ExecutionContext &context, LocalSourceState &lstate) const;
 
 	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, GlobalSinkState &sink,
 	                         OperatorSourceInput &input) const;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSinkState &sink_p, GlobalSourceState &gstate) const;
 
+	shared_ptr<TupleDataLayout> GetLayoutPtr() const;
 	const TupleDataLayout &GetLayout() const;
 	idx_t MaxThreads(GlobalSinkState &sink) const;
 	static void SetMultiScan(GlobalSinkState &sink);
@@ -61,7 +69,7 @@ private:
 	void SetGroupingValues();
 	void PopulateGroupChunk(DataChunk &group_chunk, DataChunk &input_chunk) const;
 
-	TupleDataLayout layout;
+	shared_ptr<TupleDataLayout> layout_ptr;
 };
 
 } // namespace duckdb

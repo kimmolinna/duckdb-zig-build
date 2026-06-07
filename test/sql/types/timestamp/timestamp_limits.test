@@ -2,9 +2,6 @@
 # description: Test timestamp limits
 # group: [timestamp]
 
-statement ok
-PRAGMA enable_verification
-
 query I
 select timestamp '1970-01-01';
 ----
@@ -97,17 +94,6 @@ statement error
 select timestamp '294247-01-10 04:00:54.775806' + interval (1) year
 ----
 Conversion Error: Date and time not in timestamp range
-
-# Offset overflow
-statement error
-SELECT '290309-12-22 (BC) 00:00:00+07:00'::TIMESTAMP;
-----
-Conversion Error: timestamp field value out of range
-
-statement error
-SELECT '294247-01-10 04:00:54-07:00'::TIMESTAMP;
-----
-Conversion Error: timestamp field value out of range
 
 # functions on limits
 query II

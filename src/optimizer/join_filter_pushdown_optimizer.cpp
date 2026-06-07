@@ -7,6 +7,7 @@
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -19,15 +20,73 @@ namespace duckdb {
 JoinFilterPushdownOptimizer::JoinFilterPushdownOptimizer(Optimizer &optimizer) : optimizer(optimizer) {
 }
 
-bool PushdownJoinFilterExpression(Expression &expr, JoinFilterPushdownColumn &filter) {
-	if (expr.GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
-		// not a simple column ref - bail-out
+bool JoinFilterPushdownUtil::PushdownJoinFilterExpression(const Expression &expr, JoinFilterPushdownColumn &filter) {
+	if (expr.GetReturnType().IsNested()) {
+		// nested columns are not supported for pushdown
 		return false;
 	}
-	// column-ref - pass through the new column binding
-	auto &colref = expr.Cast<BoundColumnRefExpression>();
-	filter.probe_column_index = colref.binding;
-	return true;
+	if (expr.GetReturnType().id() == LogicalTypeId::INTERVAL) {
+		// interval is not supported for pushdown
+		return false;
+	}
+	if (filter.mode == JoinFilterPushdownMode::RECONSTRUCT_EXPRESSION && !filter.runtime_filter_type.IsValid()) {
+		filter.runtime_filter_type = expr.GetReturnType();
+	}
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_COLUMN_REF: {
+		// column-ref - pass through the new column binding
+		auto &colref = expr.Cast<BoundColumnRefExpression>();
+		filter.probe_column_index = colref.Binding();
+		return true;
+	}
+	case ExpressionClass::BOUND_CAST: {
+		// We allow pushing through integral down/upcasts, as long as source/target are (u)bigint or smaller
+		const auto &bound_cast = expr.Cast<BoundCastExpression>();
+		const auto &src = bound_cast.Child().GetReturnType();
+		const auto &tgt = bound_cast.GetReturnType();
+		if (!src.IsIntegral() || !tgt.IsIntegral()) {
+			return false;
+		}
+		if (GetTypeIdSize(src.InternalType()) > GetTypeIdSize(PhysicalType::INT64) ||
+		    GetTypeIdSize(tgt.InternalType()) > GetTypeIdSize(PhysicalType::INT64)) {
+			return false; // Only do this for (u)bigint and smaller
+		}
+		if (!JoinFilterPushdownUtil::PushdownJoinFilterExpression(bound_cast.Child(), filter)) {
+			return false;
+		}
+		const bool widening_signed_cast =
+		    src.IsSigned() == tgt.IsSigned() && GetTypeIdSize(tgt.InternalType()) >= GetTypeIdSize(src.InternalType());
+		const bool widening_unsigned_to_signed_cast =
+		    !src.IsSigned() && tgt.IsSigned() && GetTypeIdSize(tgt.InternalType()) > GetTypeIdSize(src.InternalType());
+		if (widening_signed_cast || widening_unsigned_to_signed_cast) {
+			filter.runtime_filter_type = expr.GetReturnType();
+		} else {
+			filter.mode = JoinFilterPushdownMode::STORAGE_ONLY;
+			filter.runtime_filter_type = LogicalType::INVALID;
+		}
+		return true;
+	}
+	default:
+		return false;
+	}
+}
+
+bool JoinFilterPushdownUtil::JoinTypeIsSupported(JoinType join_type) {
+	switch (join_type) {
+	case JoinType::MARK:
+	case JoinType::SINGLE:
+	case JoinType::LEFT:
+	case JoinType::OUTER:
+	case JoinType::ANTI:
+	case JoinType::RIGHT_ANTI:
+		// cannot generate join filters for these join types
+		// mark/single - cannot change cardinality of probe side
+		// left/outer always need to include every row from probe side
+		// FIXME: anti/right_anti - we could do this, but need to invert the join conditions
+		return false;
+	default:
+		return true;
+	}
 }
 
 void JoinFilterPushdownOptimizer::GetPushdownFilterTargets(LogicalOperator &op,
@@ -36,9 +95,12 @@ void JoinFilterPushdownOptimizer::GetPushdownFilterTargets(LogicalOperator &op,
 	auto &probe_child = op;
 	switch (probe_child.type) {
 	case LogicalOperatorType::LOGICAL_LIMIT:
+	case LogicalOperatorType::LOGICAL_TOP_N:
+		// LIMIT/TOP_N determines which rows are part of the probe side before the join.
+		// Pushing a join filter below it can change which rows survive the limit/offset.
+		break;
 	case LogicalOperatorType::LOGICAL_FILTER:
 	case LogicalOperatorType::LOGICAL_ORDER_BY:
-	case LogicalOperatorType::LOGICAL_TOP_N:
 	case LogicalOperatorType::LOGICAL_DISTINCT:
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
@@ -76,7 +138,7 @@ void JoinFilterPushdownOptimizer::GetPushdownFilterTargets(LogicalOperator &op,
 			auto child_bindings = child->GetColumnBindings();
 			child_columns.reserve(columns.size());
 			for (auto &child_column : columns) {
-				JoinFilterPushdownColumn new_col;
+				auto new_col = child_column;
 				new_col.probe_column_index = child_bindings[child_column.probe_column_index.column_index];
 				child_columns.push_back(new_col);
 			}
@@ -97,11 +159,21 @@ void JoinFilterPushdownOptimizer::GetPushdownFilterTargets(LogicalOperator &op,
 			// filter pushdown is not supported - no need to consider this node
 			return;
 		}
+		get.ResolveOperatorTypes();
+		const auto bindings = get.GetColumnBindings();
 		for (auto &filter : columns) {
 			if (filter.probe_column_index.table_index != get.table_index) {
 				// the filter does not apply to the probe side here - bail-out
 				return;
 			}
+			// add storage type to columns
+			for (idx_t i = 0; i < bindings.size(); i++) {
+				if (filter.probe_column_index.column_index == bindings[i].column_index) {
+					filter.storage_type = get.types[i];
+					break;
+				}
+			}
+			D_ASSERT(filter.storage_type != LogicalType::INVALID);
 		}
 		targets.emplace_back(get, std::move(columns));
 		break;
@@ -114,8 +186,8 @@ void JoinFilterPushdownOptimizer::GetPushdownFilterTargets(LogicalOperator &op,
 				// index does not belong to this projection - bail-out
 				return;
 			}
-			auto &expr = *proj.expressions[filter.probe_column_index.column_index];
-			if (!PushdownJoinFilterExpression(expr, filter)) {
+			auto &expr = proj.GetExpression(filter.probe_column_index);
+			if (!JoinFilterPushdownUtil::PushdownJoinFilterExpression(expr, filter)) {
 				// cannot push through this expression - bail-out
 				return;
 			}
@@ -131,8 +203,8 @@ void JoinFilterPushdownOptimizer::GetPushdownFilterTargets(LogicalOperator &op,
 				// index does not refer to a group - bail-out
 				return;
 			}
-			auto &expr = *aggr.groups[filter.probe_column_index.column_index];
-			if (!PushdownJoinFilterExpression(expr, filter)) {
+			auto &expr = aggr.GetExpression(filter.probe_column_index);
+			if (!JoinFilterPushdownUtil::PushdownJoinFilterExpression(expr, filter)) {
 				// cannot push through this expression - bail-out
 				return;
 			}
@@ -146,22 +218,31 @@ void JoinFilterPushdownOptimizer::GetPushdownFilterTargets(LogicalOperator &op,
 	}
 }
 
-void JoinFilterPushdownOptimizer::GenerateJoinFilters(LogicalComparisonJoin &join) {
-	switch (join.join_type) {
-	case JoinType::MARK:
-	case JoinType::SINGLE:
-	case JoinType::LEFT:
-	case JoinType::OUTER:
-	case JoinType::ANTI:
-	case JoinType::RIGHT_ANTI:
-	case JoinType::RIGHT_SEMI:
-		// cannot generate join filters for these join types
-		// mark/single - cannot change cardinality of probe side
-		// left/outer always need to include every row from probe side
-		// FIXME: anti/right_anti - we could do this, but need to invert the join conditions
-		return;
+bool JoinFilterPushdownOptimizer::IsFiltering(const unique_ptr<LogicalOperator> &op) {
+	switch (op->type) {
+	case LogicalOperatorType::LOGICAL_GET: {
+		auto &get = op->Cast<LogicalGet>();
+		return get.table_filters.HasFilters();
+	}
+	case LogicalOperatorType::LOGICAL_FILTER: {
+		return true;
+	}
+	case LogicalOperatorType::LOGICAL_TOP_N: {
+		return true;
+	}
 	default:
-		break;
+		for (const unique_ptr<LogicalOperator> &child : op->children) {
+			if (IsFiltering(child)) {
+				return true;
+			}
+		}
+		return false;
+	}
+}
+
+void JoinFilterPushdownOptimizer::GenerateJoinFilters(LogicalComparisonJoin &join) {
+	if (!JoinFilterPushdownUtil::JoinTypeIsSupported(join.join_type)) {
+		return;
 	}
 	// re-order conditions here - otherwise this will happen later on and invalidate the indexes we generate
 	PhysicalComparisonJoin::ReorderConditions(join.conditions);
@@ -170,27 +251,29 @@ void JoinFilterPushdownOptimizer::GenerateJoinFilters(LogicalComparisonJoin &joi
 	vector<JoinFilterPushdownColumn> pushdown_columns;
 	for (idx_t cond_idx = 0; cond_idx < join.conditions.size(); cond_idx++) {
 		auto &cond = join.conditions[cond_idx];
-		if (cond.comparison != ExpressionType::COMPARE_EQUAL) {
-			// only equality supported for now
+		if (!cond.IsComparison()) {
 			continue;
 		}
-		if (cond.left->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
-			// only bound column ref supported for now
+		switch (cond.GetComparisonType()) {
+		case ExpressionType::COMPARE_EQUAL:
+		case ExpressionType::COMPARE_LESSTHAN:
+		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		case ExpressionType::COMPARE_GREATERTHAN:
+		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+			break;
+		case ExpressionType::COMPARE_NOT_DISTINCT_FROM:
+			// TODO: Need OR predicates
+			continue;
+		default:
 			continue;
 		}
-		if (cond.left->return_type.IsNested()) {
-			// nested columns are not supported for pushdown
-			continue;
-		}
-		if (cond.left->return_type.id() == LogicalTypeId::INTERVAL) {
-			// interval is not supported for pushdown
-			continue;
-		}
-		JoinFilterPushdownColumn pushdown_col;
-		auto &colref = cond.left->Cast<BoundColumnRefExpression>();
-		pushdown_col.probe_column_index = colref.binding;
-		pushdown_columns.push_back(pushdown_col);
 
+		JoinFilterPushdownColumn pushdown_col;
+		if (!JoinFilterPushdownUtil::PushdownJoinFilterExpression(cond.GetLHS(), pushdown_col)) {
+			continue;
+		}
+
+		pushdown_columns.push_back(pushdown_col);
 		pushdown_info->join_condition.push_back(cond_idx);
 	}
 	if (pushdown_columns.empty()) {
@@ -215,9 +298,11 @@ void JoinFilterPushdownOptimizer::GenerateJoinFilters(LogicalComparisonJoin &joi
 
 	// Even if we cannot find any table sources in which we can push down filters,
 	// we still initialize the aggregate states so that we have the possibility of doing a perfect hash join
-	const auto compute_aggregates_anyway = join.join_type == JoinType::INNER && join.conditions.size() == 1 &&
-	                                       pushdown_info->join_condition.size() == 1 &&
-	                                       TypeIsIntegral(join.conditions[0].right->return_type.InternalType());
+	// TODO: Can ExpressionType::COMPARE_NOT_DISTINCT_FROM be used with perfect hash joins?
+	const auto compute_aggregates_anyway =
+	    join.join_type == JoinType::INNER && join.conditions.size() == 1 && pushdown_info->join_condition.size() == 1 &&
+	    join.conditions[0].IsComparison() && join.conditions[0].GetComparisonType() == ExpressionType::COMPARE_EQUAL &&
+	    TypeIsIntegral(join.conditions[0].GetRHS().GetReturnType().InternalType());
 	if (pushdown_info->probe_info.empty() && !compute_aggregates_anyway) {
 		// no table sources found in which we can push down filters
 		return;
@@ -231,16 +316,21 @@ void JoinFilterPushdownOptimizer::GenerateJoinFilters(LogicalComparisonJoin &joi
 		for (auto &aggr : aggr_functions) {
 			FunctionBinder function_binder(optimizer.GetContext());
 			vector<unique_ptr<Expression>> aggr_children;
-			aggr_children.push_back(join.conditions[join_condition].right->Copy());
+			aggr_children.push_back(join.conditions[join_condition].GetRHS().Copy());
 			auto aggr_expr = function_binder.BindAggregateFunction(aggr, std::move(aggr_children), nullptr,
 			                                                       AggregateType::NON_DISTINCT);
-			if (aggr_expr->children.size() != 1) {
+			if (aggr_expr->GetChildren().size() != 1) {
 				// min/max with collation - not supported
 				return;
 			}
 			pushdown_info->min_max_aggregates.push_back(std::move(aggr_expr));
 		}
 	}
+	if (!pushdown_info->probe_info.empty()) {
+		const idx_t child_idx = join.children[1]->type == LogicalOperatorType::LOGICAL_DELIM_GET ? 0 : 1;
+		pushdown_info->build_side_has_filter = IsFiltering(join.children[child_idx]);
+	}
+
 	// set up the filter pushdown in the join itself
 	join.filter_pushdown = std::move(pushdown_info);
 }

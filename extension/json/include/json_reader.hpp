@@ -12,8 +12,8 @@
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/enums/file_compression_type.hpp"
 #include "duckdb/common/file_system.hpp"
-#include "duckdb/common/base_file_reader.hpp"
-#include "duckdb/common/multi_file_reader.hpp"
+#include "duckdb/common/multi_file/base_file_reader.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "json_reader_options.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "json_common.hpp"
@@ -46,7 +46,7 @@ public:
 
 struct JSONFileHandle {
 public:
-	JSONFileHandle(unique_ptr<FileHandle> file_handle, Allocator &allocator);
+	JSONFileHandle(QueryContext context, unique_ptr<FileHandle> file_handle, Allocator &allocator);
 
 	bool IsOpen() const;
 	void Close();
@@ -71,9 +71,11 @@ public:
 
 private:
 	idx_t ReadInternal(char *pointer, const idx_t requested_size);
-	idx_t ReadFromCache(char *&pointer, idx_t &size, idx_t &position);
+	idx_t ReadFromCache(char *&pointer, idx_t &size, atomic<idx_t> &position);
 
 private:
+	QueryContext context;
+
 	//! The JSON file handle
 	unique_ptr<FileHandle> file_handle;
 	Allocator &allocator;
@@ -83,7 +85,7 @@ private:
 	const idx_t file_size;
 
 	//! Read properties
-	idx_t read_position;
+	atomic<idx_t> read_position;
 	atomic<idx_t> requested_reads;
 	atomic<idx_t> actual_reads;
 	atomic<bool> last_read_requested;
@@ -177,7 +179,7 @@ struct JSONError {
 
 class JSONReader : public BaseFileReader {
 public:
-	JSONReader(ClientContext &context, JSONReaderOptions options, string file_name);
+	JSONReader(ClientContext &context, JSONReaderOptions options, OpenFileInfo file);
 
 	void OpenJSONFile();
 	void CloseHandle();
@@ -201,6 +203,19 @@ public:
 	JSONFileHandle &GetFileHandle() const;
 
 public:
+	string GetReaderType() const override {
+		return "JSON";
+	}
+
+	void PrepareReader(ClientContext &context, GlobalTableFunctionState &) override;
+	bool TryInitializeScan(ClientContext &context, GlobalTableFunctionState &gstate,
+	                       LocalTableFunctionState &lstate) override;
+	AsyncResult Scan(ClientContext &context, GlobalTableFunctionState &global_state,
+	                 LocalTableFunctionState &local_state, DataChunk &chunk) override;
+	void FinishFile(ClientContext &context, GlobalTableFunctionState &gstate_p) override;
+	double GetProgressInFile(ClientContext &context) override;
+
+public:
 	//! Get a new buffer index (must hold the lock)
 	idx_t GetBufferIndex();
 	//! Set line count for a buffer that is done (grabs the lock)
@@ -215,9 +230,9 @@ public:
 
 	void Initialize(Allocator &allocator, idx_t buffer_size);
 	bool InitializeScan(JSONReaderScanState &state, JSONFileReadType file_read_type);
-	void ParseJSON(JSONReaderScanState &scan_state, char *const json_start, const idx_t json_size,
+	bool ParseJSON(JSONReaderScanState &scan_state, char *const json_start, const idx_t json_size,
 	               const idx_t remaining);
-	void ParseNextChunk(JSONReaderScanState &scan_state);
+	bool ParseNextChunk(JSONReaderScanState &scan_state);
 	idx_t Scan(JSONReaderScanState &scan_state);
 	bool ReadNextBuffer(JSONReaderScanState &scan_state);
 	bool PrepareBufferForRead(JSONReaderScanState &scan_state);

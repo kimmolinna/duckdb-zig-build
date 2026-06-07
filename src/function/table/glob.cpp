@@ -3,7 +3,7 @@
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/config.hpp"
-#include "duckdb/common/multi_file_reader.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 
 namespace duckdb {
 
@@ -41,15 +41,18 @@ static void GlobFunction(ClientContext &context, TableFunctionInput &data_p, Dat
 	auto &bind_data = data_p.bind_data->Cast<GlobFunctionBindData>();
 	auto &state = data_p.global_state->Cast<GlobFunctionState>();
 
+	state.file_list_scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
 	idx_t count = 0;
+	auto &file_column = output.data[0];
 	while (count < STANDARD_VECTOR_SIZE) {
-		string file;
+		OpenFileInfo file;
 		if (!bind_data.file_list->Scan(state.file_list_scan, file)) {
 			break;
 		}
-		output.data[0].SetValue(count++, file);
+		file_column.Append(Value(file.path));
+		count++;
+		state.file_list_scan.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
 	}
-	output.SetCardinality(count);
 }
 
 void GlobTableFunction::RegisterFunction(BuiltinFunctions &set) {

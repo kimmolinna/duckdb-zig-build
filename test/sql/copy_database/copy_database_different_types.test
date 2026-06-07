@@ -2,10 +2,8 @@
 # description: Test attach mixed with the COPY statement
 # group: [copy_database]
 
-require noforcestorage
-
 statement ok
-ATTACH DATABASE ':memory:' AS db1;
+ATTACH '{TEST_DIR}/copy_database_different_types.db' AS db1
 
 statement ok
 USE db1
@@ -17,7 +15,7 @@ statement ok
 INSERT INTO test VALUES (42, 88, 'hello');
 
 # FIXME - (unique) indexes aren't copied currently
-mode skip
+mode skip instable
 
 statement ok
 CREATE UNIQUE INDEX i_unique ON test(a);
@@ -51,10 +49,13 @@ statement ok
 CREATE FUNCTION my_add(a, b) AS a + b
 
 statement ok
-COPY FROM DATABASE db1 TO memory
+ATTACH '{TEST_DIR}/other_copy_database_different_types.db' AS db2;
 
 statement ok
-USE memory
+COPY FROM DATABASE db1 TO db2
+
+statement ok
+USE db2
 
 query III
 SELECT * FROM test;
@@ -74,7 +75,7 @@ SELECT * FROM v1;
 42	88	hello
 
 # FIXME - unique indexes aren't copied currently
-mode skip
+mode skip instable
 
 statement error
 INSERT INTO test VALUES (42, 88, 'hello');

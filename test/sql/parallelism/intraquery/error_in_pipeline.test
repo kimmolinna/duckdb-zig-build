@@ -3,9 +3,6 @@
 # group: [intraquery]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 PRAGMA threads=16
 
 statement ok
@@ -18,3 +15,4 @@ insert into varchars values ('hello')
 statement error
 select (select min(i::int)+tbl.k from varchars) from (values (1), (2), (3)) tbl(k);
 ----
+<REGEX>:.*Conversion Error.*Could not convert string.*

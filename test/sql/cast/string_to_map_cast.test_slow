@@ -2,9 +2,6 @@
 # description: cast strings into map structures
 # group: [cast]
 
-statement ok
-PRAGMA enable_verification
-
 #               Basic tests:
 # ---------------------------------------------------
 
@@ -31,7 +28,7 @@ SELECT '{greetings=[Hello World!, Hello DuckDB, Howdy], farewells=[Bye World, By
 query I
 SELECT '{"key=A"=Duck, "key=B"="hello=world"}'::MAP(VARCHAR, VARCHAR)
 ----
-{key=A=Duck, key=B=hello=world}
+{'key=A'=Duck, 'key=B'='hello=world'}
 
 statement error
 SELECT '{a=1, b=2, a=3}'::MAP(VARCHAR, INT)
@@ -78,27 +75,27 @@ SELECT CAST('{''hello''=2, ''world''=50, ''!''=12}' AS MAP(VARCHAR, INT));
 query I
 SELECT CAST($${\'hello\'=hello, \'world\'=world, \'!\'=!}$$ AS MAP(VARCHAR, VARCHAR));
 ----
-{'hello'=hello, 'world'=world, '!'=!}
+{'\'hello\''=hello, '\'world\''=world, '\'!\''=!}
 
 query I
 SELECT CAST($${[[\'🦆, 🦆, 🦆\']]=100, [[duck, db, \'🦆\']]=101}$$ AS MAP(VARCHAR[][], INT));
 ----
-{[['🦆, 🦆, 🦆']]=100, [[duck, db, '🦆']]=101}
+{[['\'🦆', 🦆, '🦆\'']]=100, [[duck, db, '\'🦆\'']]=101}
 
 query I
-SELECT CAST('{"can''t"="you''re", "i''m"="q''u''o''t''e"}' AS MAP(VARCHAR, VARCHAR));
+SELECT CAST($${"can't"="you're", "i'm"="q'u'o't'e"}$$ AS MAP(VARCHAR, VARCHAR));
 ----
-{can't=you're, i'm=q'u'o't'e}
+{'can\'t'='you\'re', 'i\'m'='q\'u\'o\'t\'e'}
 
-query I
-SELECT CAST('{"{"="}", "["="]"}' AS MAP(VARCHAR, VARCHAR));
+query III
+SELECT CAST('{"{"="}", "["="]"}' AS MAP(VARCHAR, VARCHAR)) a, a::VARCHAR::MAP(VARCHAR, VARCHAR) b, a == b;
 ----
-{{=}, [=]}
+{'{'='}', '['=']'}	{'{'='}', '['=']'}	true
 
-query I
-SELECT CAST('{''}''="{", '']''="["}' AS MAP(VARCHAR, VARCHAR));
+query III
+SELECT CAST($${'}'="{", ']'="["}$$ AS MAP(VARCHAR, VARCHAR)) a, a::VARCHAR::MAP(VARCHAR, VARCHAR) b, a == b;
 ----
-{}={, ]=[}
+{'}'='{', ']'='['}	{'}'='{', ']'='['}	true
 
 
 #               Test for whitespaces
@@ -244,7 +241,7 @@ SELECT CAST('{A={a:[12,13,14], b:"🦆", c:0.12}, B={a:[12,13,14], b:DuckDuck, c
 query I
 SELECT CAST('{{a:Meow=Meow}={a:12, b:0.8, c:MeowMeow}, {a:Quack}={a:13, b:3.2, c:QuackQuack}}' AS MAP(STRUCT(a VARCHAR), STRUCT(a INT, b DOUBLE, c VARCHAR)));
 ----
-{{'a': Meow=Meow}={'a': 12, 'b': 0.8, 'c': MeowMeow}, {'a': Quack}={'a': 13, 'b': 3.2, 'c': QuackQuack}}
+{{'a': 'Meow=Meow'}={'a': 12, 'b': 0.8, 'c': MeowMeow}, {'a': Quack}={'a': 13, 'b': 3.2, 'c': QuackQuack}}
 
 query I
 SELECT CAST('{{A:AAA}={a:[12,13,14], b:"🦆", c:{a:[[a], [b, c]], b:[123]}}}' AS MAP(STRUCT(A VARCHAR), STRUCT(a INT[], b VARCHAR, c STRUCT(a VARCHAR[][], b INT[]))));
@@ -273,7 +270,7 @@ SELECT CAST('{True=[true, FALSE, true], False=[false, false, false]}' AS MAP(BOO
 foreach type TINYINT SMALLINT INTEGER BIGINT HUGEINT UTINYINT USMALLINT UINTEGER UBIGINT UHUGEINT
 
 query I
-SELECT CAST('{0={a:1, b: 8.3}, 5.7={a:2, b: 3}}' AS MAP(${type}, STRUCT(a ${type}, b ${type})));
+SELECT CAST('{0={a:1, b: 8.3}, 5.7={a:2, b: 3}}' AS MAP({type}, STRUCT(a {type}, b {type})));
 ----
 {0={'a': 1, 'b': 8}, 6={'a': 2, 'b': 3}}
 
@@ -282,7 +279,7 @@ endloop
 foreach type DOUBLE FLOAT
 
 query I
-SELECT CAST('{-9.01=9.13 ,3=0.00002}' AS MAP(${type}, ${type}));
+SELECT CAST('{-9.01=9.13 ,3=0.00002}' AS MAP({type}, {type}));
 ----
 {-9.01=9.13, 3.0=2e-05}
 
@@ -323,12 +320,12 @@ statement ok
 CREATE TABLE assembled_maps(col1 MAP(INT, VARCHAR));
 
 statement ok
-COPY (SELECT '{8="hello, DuckDB"}') TO '__TEST_DIR__/assembled_maps.csv';
+COPY (SELECT '{8="hello, DuckDB"}') TO '{TEST_DIR}/assembled_maps.csv';
 
 statement ok
-COPY assembled_maps FROM '__TEST_DIR__/assembled_maps.csv';
+COPY assembled_maps FROM '{TEST_DIR}/assembled_maps.csv';
 
 query I
 SELECT * FROM assembled_maps;
 ----
-{8=hello, DuckDB}
+{8='hello, DuckDB'}

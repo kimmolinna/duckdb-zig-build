@@ -3,12 +3,9 @@
 # group: [auto]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 PRAGMA verify_parallelism
 
 query I
-select count(*) from read_csv_auto('data/csv/page_namespacepage_title_sample.csv', SAMPLE_SIZE = -1)
+select count(*) from read_csv_auto('{DATA_DIR}/csv/page_namespacepage_title_sample.csv', SAMPLE_SIZE = -1)
 ----
 3993

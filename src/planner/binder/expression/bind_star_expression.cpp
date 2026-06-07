@@ -25,7 +25,7 @@ StarExpressionType Binder::FindStarExpression(unique_ptr<ParsedExpression> &expr
 	StarExpressionType has_star = StarExpressionType::NONE;
 	if (expr->GetExpressionType() == ExpressionType::OPERATOR_UNPACK) {
 		auto &operator_expr = expr->Cast<OperatorExpression>();
-		auto res = FindStarExpression(operator_expr.children[0], star, is_root, in_columns);
+		auto res = FindStarExpression(operator_expr.GetChildrenMutable()[0], star, is_root, in_columns);
 		if (res != StarExpressionType::STAR && res != StarExpressionType::COLUMNS) {
 			throw BinderException(
 			    "UNPACK can only be used in combination with a STAR (*) expression or COLUMNS expression");
@@ -48,12 +48,12 @@ StarExpressionType Binder::FindStarExpression(unique_ptr<ParsedExpression> &expr
 				    "STAR expression is only allowed as the root element of an expression. Use COLUMNS(*) instead.");
 			}
 
-			if (!current_star.replace_list.empty()) {
+			if (!current_star.ReplaceList().empty()) {
 				// '*' inside COLUMNS can not have a REPLACE list
 				throw BinderException(
 				    "STAR expression with REPLACE list is only allowed as the root element of COLUMNS");
 			}
-			if (!current_star.rename_list.empty()) {
+			if (!current_star.RenameList().empty()) {
 				// '*' inside COLUMNS can not have a REPLACE list
 				throw BinderException(
 				    "STAR expression with RENAME list is only allowed as the root element of COLUMNS");
@@ -152,20 +152,25 @@ string Binder::ReplaceColumnsAlias(const string &alias, const string &column_nam
 
 void TryTransformStarLike(unique_ptr<ParsedExpression> &root) {
 	// detect "* LIKE [literal]" and similar expressions
-	if (root->GetExpressionClass() != ExpressionClass::FUNCTION) {
+	bool inverse = root->GetExpressionType() == ExpressionType::OPERATOR_NOT;
+	auto &expr = inverse ? root->Cast<OperatorExpression>().GetChildrenMutable()[0] : root;
+	if (!expr) {
 		return;
 	}
-	auto &function = root->Cast<FunctionExpression>();
-	if (function.children.size() < 2 || function.children.size() > 3) {
+	if (expr->GetExpressionClass() != ExpressionClass::FUNCTION) {
 		return;
 	}
-	auto &left = function.children[0];
+	auto &function = expr->Cast<FunctionExpression>();
+	if (function.GetArguments().size() < 2 || function.GetArguments().size() > 3) {
+		return;
+	}
+	auto &left = function.GetArgumentsMutable()[0];
 	// expression must have a star on the LHS, and a literal on the RHS
-	if (left->GetExpressionClass() != ExpressionClass::STAR) {
+	if (left.GetExpression().GetExpressionClass() != ExpressionClass::STAR) {
 		return;
 	}
-	auto &star = left->Cast<StarExpression>();
-	if (star.columns) {
+	auto &star = left.GetExpressionMutable()->Cast<StarExpression>();
+	if (star.IsColumns()) {
 		// COLUMNS(*) has different semantics
 		return;
 	}
@@ -180,44 +185,52 @@ void TryTransformStarLike(unique_ptr<ParsedExpression> &root) {
 	                                     "ilike_escape",
 	                                     "not_ilike_escape",
 	                                     "like_escape"};
-	if (supported_ops.count(function.function_name) == 0) {
+	if (supported_ops.count(function.FunctionName()) == 0) {
 		// unsupported op for * expression
-		throw BinderException(*root, "Function \"%s\" cannot be applied to a star expression", function.function_name);
+		throw BinderException(*root, "Function \"%s\" cannot be applied to a star expression", function.FunctionName());
 	}
-	auto &right = function.children[1];
-	if (right->GetExpressionClass() != ExpressionClass::CONSTANT) {
+	auto &right = function.GetArgumentsMutable()[1];
+	if (right.GetExpression().GetExpressionClass() != ExpressionClass::CONSTANT) {
 		throw BinderException(*root, "Pattern applied to a star expression must be a constant");
 	}
-	if (!star.rename_list.empty()) {
+	if (!star.RenameList().empty()) {
 		throw BinderException(*root, "Rename list cannot be combined with a filtering operation");
 	}
-	if (!star.replace_list.empty()) {
+	if (!star.ReplaceList().empty()) {
 		throw BinderException(*root, "Replace list cannot be combined with a filtering operation");
 	}
 	auto original_alias = root->GetAlias();
 	auto star_expr = std::move(left);
 	unique_ptr<ParsedExpression> child_expr;
-	if (function.function_name == "regexp_full_match" && star.exclude_list.empty()) {
+	if (!inverse && function.FunctionName() == "regexp_full_match" && star.ExcludeList().empty()) {
 		// * SIMILAR TO '[regex]' is equivalent to COLUMNS('[regex]') so we can just move the expression directly
-		child_expr = std::move(right);
+		child_expr = std::move(right.GetExpressionMutable());
 	} else {
 		// for other expressions -> generate a columns expression
 		// "* LIKE '%literal%'
 		// -> COLUMNS(list_filter(*, x -> x LIKE '%literal%'))
-		auto lhs = make_uniq<ColumnRefExpression>("__lambda_col");
-		function.children[0] = lhs->Copy();
+		vector<string> named_parameters;
+		named_parameters.push_back("__lambda_col");
+		function.GetArgumentsMutable()[0] = FunctionArgument(make_uniq<ColumnRefExpression>("__lambda_col"));
+		function.GetArgumentsMutable()[1] = std::move(right);
 
-		auto lambda = make_uniq<LambdaExpression>(std::move(lhs), std::move(root));
+		unique_ptr<ParsedExpression> lambda_body = std::move(expr);
+		if (inverse) {
+			vector<unique_ptr<ParsedExpression>> root_children;
+			root_children.push_back(std::move(lambda_body));
+			lambda_body = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_NOT, std::move(root_children));
+		}
+		auto lambda = make_uniq<LambdaExpression>(std::move(named_parameters), std::move(lambda_body));
+
 		vector<unique_ptr<ParsedExpression>> filter_children;
-		filter_children.push_back(std::move(star_expr));
+		filter_children.push_back(std::move(star_expr.GetExpressionMutable()));
 		filter_children.push_back(std::move(lambda));
-		auto list_filter = make_uniq<FunctionExpression>("list_filter", std::move(filter_children));
-		child_expr = std::move(list_filter);
+		child_expr = make_uniq<FunctionExpression>("list_filter", std::move(filter_children));
 	}
 
-	auto columns_expr = make_uniq<StarExpression>();
-	columns_expr->columns = true;
-	columns_expr->expr = std::move(child_expr);
+	auto columns_expr = make_uniq<StarExpression>(star.RelationName());
+	columns_expr->IsColumnsMutable() = true;
+	columns_expr->ExpressionMutable() = std::move(child_expr);
 	columns_expr->SetAlias(std::move(original_alias));
 	root = std::move(columns_expr);
 }
@@ -229,7 +242,7 @@ optional_ptr<ParsedExpression> Binder::GetResolvedColumnExpression(ParsedExpress
 			break;
 		}
 		if (expr->GetExpressionType() == ExpressionType::OPERATOR_COALESCE) {
-			expr = expr->Cast<OperatorExpression>().children[0].get();
+			expr = expr->Cast<OperatorExpression>().GetChildrenMutable()[0].get();
 		} else {
 			// unknown expression
 			return nullptr;
@@ -259,17 +272,17 @@ void Binder::ExpandStarExpression(unique_ptr<ParsedExpression> expr,
 	bind_context.GenerateAllColumnExpressions(*star, star_list);
 
 	unique_ptr<duckdb_re2::RE2> regex;
-	if (star->expr) {
+	if (star->Expression()) {
 		// COLUMNS with an expression
 		// two options:
 		// VARCHAR parameter <- this is a regular expression
 		// LIST of VARCHAR parameters <- this is a set of columns
 		TableFunctionBinder binder(*this, context);
-		auto child = star->expr->Copy();
+		auto child = star->Expression()->Copy();
 		auto result = binder.Bind(child);
 		if (!result->IsFoldable()) {
 			// cannot resolve parameters here
-			if (star->expr->HasParameter()) {
+			if (star->Expression()->HasParameter()) {
 				throw ParameterNotResolvedException();
 			} else {
 				throw BinderException("Unsupported expression in COLUMNS");
@@ -300,7 +313,21 @@ void Binder::ExpandStarExpression(unique_ptr<ParsedExpression> expr,
 				new_list.push_back(std::move(expanded_expr));
 			}
 			if (new_list.empty()) {
-				auto err = StringUtil::Format("No matching columns found that match regex \"%s\"", regex_str);
+				vector<string> candidates;
+				for (auto &expanded_expr : star_list) {
+					auto child_expr = GetResolvedColumnExpression(*expanded_expr);
+					if (!child_expr) {
+						continue;
+					}
+					auto &colref = child_expr->Cast<ColumnRefExpression>();
+					candidates.push_back(colref.GetColumnName());
+				}
+				string candidate_str;
+				if (!candidates.empty()) {
+					candidate_str = "\n" + StringUtil::CandidatesErrorMessage(candidates, regex_str, "Did you mean");
+				}
+				auto err =
+				    StringUtil::Format("No matching columns found that match regex \"%s\"%s", regex_str, candidate_str);
 				throw BinderException(*star, err);
 			}
 			star_list = std::move(new_list);

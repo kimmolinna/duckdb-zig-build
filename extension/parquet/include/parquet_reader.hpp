@@ -8,24 +8,63 @@
 
 #pragma once
 
+#include <stdint.h>
+#include <exception>
+#include <atomic>
+#include <memory>
+#include <string>
+#include <utility>
+
 #include "duckdb.hpp"
+#include "duckdb/common/enum_util.hpp"
+#include "duckdb/common/helper.hpp"
+#include "duckdb/storage/external_file_cache/caching_file_system.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/encryption_functions.hpp"
 #include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/base_file_reader.hpp"
-#include "duckdb/common/multi_file_reader_options.hpp"
+#include "duckdb/common/multi_file/base_file_reader.hpp"
+#include "duckdb/common/multi_file/multi_file_adaptive_filter_cache.hpp"
+#include "duckdb/common/multi_file/multi_file_options.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "column_reader.hpp"
+#include "parquet_prefetch_cost_model.hpp"
 #include "parquet_file_metadata_cache.hpp"
 #include "parquet_rle_bp_decoder.hpp"
 #include "parquet_types.h"
 #include "resizable_buffer.hpp"
 #include "duckdb/execution/adaptive_filter.hpp"
+#include "duckdb/common/column_index.hpp"
+#include "duckdb/common/multi_file/multi_file_data.hpp"
+#include "duckdb/common/open_file_info.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/projection_index.hpp"
+#include "duckdb/common/shared_ptr_ipp.hpp"
+#include "duckdb/common/string.hpp"
+#include "duckdb/common/typedefs.hpp"
+#include "duckdb/common/types.hpp"
+#include "duckdb/common/types/selection_vector.hpp"
+#include "duckdb/common/types/value.hpp"
+#include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/vector.hpp"
+#include "duckdb/parallel/async_result.hpp"
+#include "parquet_column_schema.hpp"
+#include "thrift/protocol/TProtocol.h"
 
-#include <exception>
+namespace duckdb_apache {
+namespace thrift {
+class TBase;
+} // namespace thrift
+} // namespace duckdb_apache
 
 namespace duckdb_parquet {
+class EncryptionAlgorithm;
+class FileMetaData;
+class RowGroup;
+class SchemaElement;
+
 namespace format {
 class FileMetaData;
 }
@@ -38,29 +77,129 @@ class BaseStatistics;
 class TableFilterSet;
 class ParquetEncryptionConfig;
 class ParquetReader;
+class DataChunk;
+class Deserializer;
+class EncryptionUtil;
+class PhysicalOperator;
+class Serializer;
+class TableFilter;
+class ThriftFileTransport;
+struct CryptoMetaData;
+struct GlobalTableFunctionState;
+struct LocalTableFunctionState;
+struct PartitionStatistics;
+struct TableFilterState;
 
 struct ParquetReaderPrefetchConfig {
-	// Percentage of data in a row group span that should be scanned for enabling whole group prefetch
+	//! Percentage of data in a row group span that should be scanned for enabling whole group prefetch
 	static constexpr double WHOLE_GROUP_PREFETCH_MINIMUM_SCAN = 0.95;
+	//! How many row groups need to produce at least one surviving row (from filtering)
+	static constexpr double PREFETCH_FILTER_MINIMUM_MATCH_RATIO = 0.9;
 };
 
+enum class ParquetPrefetchStrategy : uint8_t {
+	NONE,
+	WHOLE_GROUP,      //! Prefetches the whole group
+	PREFETCH_FILTERS, //! Used when we have fully selective filters, so they are prefetched earlier
+	COLUMN_WISE_EAGER //! Used when we have projections and optional only filters
+};
+
+const char *ParquetPrefetchStrategyToString(ParquetPrefetchStrategy strategy);
+
+enum class ParquetPrefetchStrategyOption : uint8_t {
+	AUTO,        //! Uses the runtime strategy to pick between ParquetPrefetchStrategy
+	WHOLE_GROUP, //! Always do the whole row group
+};
+
+ParquetPrefetchStrategyOption ParquetPrefetchStrategyOptionFromString(const string &value);
+
+template <>
+const char *EnumUtil::ToChars<ParquetPrefetchStrategyOption>(ParquetPrefetchStrategyOption value);
+
+template <>
+ParquetPrefetchStrategyOption EnumUtil::FromString<ParquetPrefetchStrategyOption>(const char *value);
+
 struct ParquetScanFilter {
-	ParquetScanFilter(ClientContext &context, idx_t filter_idx, TableFilter &filter);
+	ParquetScanFilter(ClientContext &context, ProjectionIndex filter_idx, TableFilter &filter);
 	~ParquetScanFilter();
 	ParquetScanFilter(ParquetScanFilter &&) = default;
 
-	idx_t filter_idx;
+	ProjectionIndex filter_idx;
 	TableFilter &filter;
 	unique_ptr<TableFilterState> filter_state;
 };
 
+struct ParquetPrefetchColumn {
+	string name;
+	idx_t offset;
+
+	ParquetPrefetchColumn(string name_p, idx_t offset_p) : name(std::move(name_p)), offset(offset_p) {
+	}
+
+	bool operator<(const ParquetPrefetchColumn &other) const {
+		return offset < other.offset;
+	}
+};
+//! Logger-only prefetch metrics: populated only when ParquetPrefetch logging is enabled.
+struct ParquetLoggerPrefetchMetrics {
+	//! Physical prefetch groups (column-name batches) issued for the current row group, in order
+	vector<vector<string>> prefetch_groups;
+	//! Tracks which scan_filters were evaluated in the current row group (indexed by scan_filter position)
+	vector<bool> filters_used;
+	//! Prefetch strategy chosen for the current row group
+	ParquetPrefetchStrategy strategy = ParquetPrefetchStrategy::NONE;
+	//! Accepted column gap (bytes)
+	uint64_t accepted_column_gap = 0;
+
+	void Reset() {
+		prefetch_groups.clear();
+		std::fill(filters_used.begin(), filters_used.end(), false);
+		strategy = ParquetPrefetchStrategy::NONE;
+		accepted_column_gap = 0;
+	}
+
+	//! Build a prefetch group
+	void GeneratePrefetchGroup(ThriftFileTransport &trans, vector<ParquetPrefetchColumn> &requested_columns,
+	                           const vector<duckdb_parquet::ColumnChunk> &all_chunks);
+};
+
+struct ParquetPrefetchMetrics {
+	//! Whether any filter was evaluated against the current row group
+	bool filter_ran = false;
+	//! Whether the current row group produced at least one surviving row after filtering
+	bool had_match = false;
+	//! Total number of row groups for which filters were evaluated across the scan
+	idx_t row_groups_executed = 0;
+	//! Number of those row groups that produced at least one surviving row
+	idx_t row_groups_with_matches = 0;
+
+	ParquetLoggerPrefetchMetrics logger;
+
+	void FinalizeRowGroupSelectivity() {
+		if (filter_ran) {
+			row_groups_executed++;
+			if (had_match) {
+				row_groups_with_matches++;
+			}
+		}
+		filter_ran = false;
+		had_match = false;
+		logger.Reset();
+	}
+};
+
 struct ParquetReaderScanState {
+public:
+	ColumnReader &GetColumnReader(idx_t i);
+
+public:
 	vector<idx_t> group_idx_list;
 	int64_t current_group;
+	idx_t offset_in_group;
 	idx_t group_offset;
-	unique_ptr<FileHandle> file_handle;
-	unique_ptr<ColumnReader> root_reader;
-	std::unique_ptr<duckdb_apache::thrift::protocol::TProtocol> thrift_file_proto;
+	unique_ptr<CachingFileHandle> file_handle;
+	vector<unique_ptr<ColumnReader>> column_readers;
+	duckdb_base_std::unique_ptr<duckdb_apache::thrift::protocol::TProtocol> thrift_file_proto;
 
 	bool finished;
 	SelectionVector sel;
@@ -71,10 +210,20 @@ struct ParquetReaderScanState {
 	bool prefetch_mode = false;
 	bool current_group_prefetched = false;
 
-	//! Adaptive filter
-	unique_ptr<AdaptiveFilter> adaptive_filter;
+	ParquetPrefetchMetrics prefetch_metrics;
+
+	//! Per-thread adaptive filter cache
+	MultiFileAdaptiveFilterCache adaptive_filter_cache;
 	//! Table filter list
 	vector<ParquetScanFilter> scan_filters;
+	//! true once the filter at this index has driven the surviving row count to zero
+	vector<bool> filter_eliminated_all_rows;
+
+	//! (optional) pointer to the PhysicalOperator for logging
+	optional_ptr<const PhysicalOperator> op;
+
+	//! Prefetch cost model
+	PrefetchCostModelState cost_model_state;
 };
 
 struct ParquetColumnDefinition {
@@ -100,22 +249,24 @@ struct ParquetOptions {
 	explicit ParquetOptions(ClientContext &context);
 
 	bool binary_as_string = false;
+	bool variant_legacy_encoding = false;
 	bool file_row_number = false;
 	shared_ptr<ParquetEncryptionConfig> encryption_config;
-	bool debug_use_openssl = true;
 
 	vector<ParquetColumnDefinition> schema;
 	idx_t explicit_cardinality = 0;
+	bool can_have_nan = false; // if floats or doubles can contain NaN values
+	ParquetPrefetchStrategyOption prefetch_strategy = ParquetPrefetchStrategyOption::AUTO;
 };
 
 struct ParquetOptionsSerialization {
 	ParquetOptionsSerialization() = default;
-	ParquetOptionsSerialization(ParquetOptions parquet_options_p, MultiFileReaderOptions file_options_p)
+	ParquetOptionsSerialization(ParquetOptions parquet_options_p, MultiFileOptions file_options_p)
 	    : parquet_options(std::move(parquet_options_p)), file_options(std::move(file_options_p)) {
 	}
 
 	ParquetOptions parquet_options;
-	MultiFileReaderOptions file_options;
+	MultiFileOptions file_options;
 
 public:
 	void Serialize(Serializer &serializer) const;
@@ -123,21 +274,25 @@ public:
 };
 
 struct ParquetUnionData : public BaseUnionData {
-	explicit ParquetUnionData(string file_name_p) : BaseUnionData(std::move(file_name_p)) {
+	explicit ParquetUnionData(OpenFileInfo file_p) : BaseUnionData(std::move(file_p)) {
 	}
 	~ParquetUnionData() override;
 
+	optional_idx TryGetCardinalityEstimate() const override;
+	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, const string &name) override;
+
 	ParquetOptions options;
 	shared_ptr<ParquetFileMetadataCache> metadata;
+	unique_ptr<ParquetColumnSchema> root_schema;
 };
 
 class ParquetReader : public BaseFileReader {
 public:
-	ParquetReader(ClientContext &context, string file_name, ParquetOptions parquet_options,
+	ParquetReader(ClientContext &context, OpenFileInfo file, ParquetOptions parquet_options,
 	              shared_ptr<ParquetFileMetadataCache> metadata = nullptr);
 	~ParquetReader() override;
 
-	FileSystem &fs;
+	mutable CachingFileSystem fs;
 	Allocator &allocator;
 	shared_ptr<ParquetFileMetadataCache> metadata;
 	ParquetOptions parquet_options;
@@ -147,28 +302,64 @@ public:
 	atomic<idx_t> rows_read;
 
 public:
-	void InitializeScan(ClientContext &context, ParquetReaderScanState &state, vector<idx_t> groups_to_read);
-	void Scan(ClientContext &context, ParquetReaderScanState &state, DataChunk &output);
+	string GetReaderType() const override {
+		return "Parquet";
+	}
+
+	shared_ptr<BaseUnionData> GetUnionData(idx_t file_idx) override;
+	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, const string &name) override;
+
+	bool TryInitializeScan(ClientContext &context, GlobalTableFunctionState &gstate,
+	                       LocalTableFunctionState &lstate) override;
+	void PrepareScan(ClientContext &context, GlobalTableFunctionState &gstate_p,
+	                 LocalTableFunctionState &lstate_p) override;
+	AsyncResult Scan(ClientContext &context, GlobalTableFunctionState &global_state,
+	                 LocalTableFunctionState &local_state, DataChunk &chunk) override;
+	void FinishFile(ClientContext &context, GlobalTableFunctionState &gstate_p) override;
+	double GetProgressInFile(ClientContext &context) override;
+
+public:
+	void InitializeScan(ClientContext &context, ParquetReaderScanState &state, vector<idx_t> groups_to_read) const;
+	AsyncResult Scan(ClientContext &context, ParquetReaderScanState &state, DataChunk &output);
 
 	idx_t NumRows() const;
 	idx_t NumRowGroups() const;
+	idx_t GetFileSize() const;
+	idx_t GetDataSize() const;
 
 	const duckdb_parquet::FileMetaData *GetFileMetadata() const;
+	string static GetUniqueFileIdentifier(const duckdb_parquet::EncryptionAlgorithm &encryption_algorithm);
 
-	uint32_t Read(duckdb_apache::thrift::TBase &object, TProtocol &iprot);
+	uint32_t Read(duckdb_apache::thrift::TBase &object, TProtocol &iprot) const;
+	uint32_t ReadEncrypted(duckdb_apache::thrift::TBase &object, TProtocol &iprot,
+	                       CryptoMetaData &aad_crypto_metadata) const;
 	uint32_t ReadData(duckdb_apache::thrift::protocol::TProtocol &iprot, const data_ptr_t buffer,
-	                  const uint32_t buffer_size);
+	                  const uint32_t buffer_size) const;
+	uint32_t ReadDataEncrypted(duckdb_apache::thrift::protocol::TProtocol &iprot, const data_ptr_t buffer,
+	                           const uint32_t buffer_size, CryptoMetaData &aad_crypto_metadata) const;
 
 	unique_ptr<BaseStatistics> ReadStatistics(const string &name);
 
-	FileHandle &GetHandle() {
+	CachingFileHandle &GetHandle() {
 		return *file_handle;
 	}
 
 	static unique_ptr<BaseStatistics> ReadStatistics(ClientContext &context, ParquetOptions parquet_options,
 	                                                 shared_ptr<ParquetFileMetadataCache> metadata, const string &name);
+	static unique_ptr<BaseStatistics> ReadStatistics(const ParquetUnionData &union_data, const string &name);
 
 	LogicalType DeriveLogicalType(const SchemaElement &s_ele, ParquetColumnSchema &schema) const;
+	static LogicalType DeriveLogicalType(const SchemaElement &s_ele, const ParquetOptions &options,
+	                                     ParquetColumnSchema &schema);
+
+	void AddVirtualColumn(column_t virtual_column_id) override;
+
+	void GetPartitionStats(vector<PartitionStatistics> &result);
+	static void GetPartitionStats(const duckdb_parquet::FileMetaData &metadata, vector<PartitionStatistics> &result,
+	                              optional_ptr<ParquetColumnSchema> root_schema = nullptr,
+	                              optional_ptr<ParquetOptions> parquet_options = nullptr);
+	static bool MetadataCacheEnabled(ClientContext &context);
+	static shared_ptr<ParquetFileMetadataCache> GetMetadataCacheEntry(ClientContext &context, const OpenFileInfo &file);
 
 private:
 	//! Construct a parquet reader but **do not** open a file, used in ReadStatistics only
@@ -176,28 +367,42 @@ private:
 	              shared_ptr<ParquetFileMetadataCache> metadata);
 
 	void InitializeSchema(ClientContext &context);
-	bool ScanInternal(ClientContext &context, ParquetReaderScanState &state, DataChunk &output);
 	//! Parse the schema of the file
-	unique_ptr<ParquetColumnSchema> ParseSchema();
+	unique_ptr<ParquetColumnSchema> ParseSchema(ClientContext &context);
 	ParquetColumnSchema ParseSchemaRecursive(idx_t depth, idx_t max_define, idx_t max_repeat, idx_t &next_schema_idx,
-	                                         idx_t &next_file_idx);
+	                                         idx_t &next_file_idx, ClientContext &context);
 
-	unique_ptr<ColumnReader> CreateReader(ClientContext &context);
-
-	unique_ptr<ColumnReader> CreateReaderRecursive(ClientContext &context, const vector<ColumnIndex> &indexes,
-	                                               const ParquetColumnSchema &schema);
+	unique_ptr<ColumnReader> CreateReaderRecursive(ClientContext &context, const ColumnIndex &index,
+	                                               const ParquetColumnSchema &schema) const;
 	const duckdb_parquet::RowGroup &GetGroup(ParquetReaderScanState &state);
 	uint64_t GetGroupCompressedSize(ParquetReaderScanState &state);
 	idx_t GetGroupOffset(ParquetReaderScanState &state);
-	// Group span is the distance between the min page offset and the max page offset plus the max page compressed size
+	//! Group span is the distance between the min page offset and the max page offset plus the max page compressed size
 	uint64_t GetGroupSpan(ParquetReaderScanState &state);
 	void PrepareRowGroupBuffer(ParquetReaderScanState &state, idx_t out_col_idx);
+	//! Whole-group prefetch strategy.
+	ParquetPrefetchStrategy WholeGroupPrefetch(ParquetReaderScanState &state, ThriftFileTransport &trans,
+	                                           const duckdb_parquet::RowGroup &group, uint64_t total_row_group_span,
+	                                           bool log_prefetch);
+	//! Column-wise prefetch strategy.
+	ParquetPrefetchStrategy ColumnWisePrefetch(ParquetReaderScanState &state, ThriftFileTransport &trans,
+	                                           const duckdb_parquet::RowGroup &group, bool filters_look_unselective,
+	                                           bool log_prefetch) const;
+	//! Switch to the next row group and schedule its I/O (prepare column buffers, prefetch the bytes).
+	AsyncResult Schedule(ClientContext &context, ParquetReaderScanState &state, DataChunk &result, bool log_prefetch);
+	//! Process up to STANDARD_VECTOR_SIZE rows of the current row group into result.
+	SourceResultType Process(ParquetReaderScanState &state, DataChunk &result, bool log_prefetch);
 	ParquetColumnSchema ParseColumnSchema(const SchemaElement &s_ele, idx_t max_define, idx_t max_repeat,
 	                                      idx_t schema_index, idx_t column_index,
 	                                      ParquetColumnSchemaType type = ParquetColumnSchemaType::COLUMN);
 
+	MultiFileColumnDefinition ParseColumnDefinition(const duckdb_parquet::FileMetaData &file_meta_data,
+	                                                ParquetColumnSchema &element);
+	unique_ptr<AdditionalAuthenticatedData> GenerateAAD(uint8_t module_type, uint16_t row_group_ordinal,
+	                                                    uint16_t column_ordinal, uint16_t page_ordinal) const;
+
 private:
-	unique_ptr<FileHandle> file_handle;
+	unique_ptr<CachingFileHandle> file_handle;
 };
 
 } // namespace duckdb

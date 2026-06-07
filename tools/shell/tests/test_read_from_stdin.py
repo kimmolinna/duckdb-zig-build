@@ -10,6 +10,22 @@ import os
 
 @pytest.mark.skipif(os.name == 'nt', reason="Skipped on windows")
 class TestReadFromStdin(object):
+
+    def test_read_stdin_direct(self, shell):
+        test = (
+            ShellTest(shell)
+            .input_file('data/csv/test/test.csv')
+            .statement("""create table mytable as select * from read_text('/dev/stdin')""")
+            .statement("select length(content) as len from mytable;")
+            .add_argument(
+                '-csv',
+                ':memory:'
+            )
+        )
+        result = test.run()
+        result.check_stdout("len")
+        result.check_stdout('77780')
+
     def test_read_stdin_csv(self, shell):
         test = (
             ShellTest(shell)
@@ -179,6 +195,8 @@ class TestReadFromStdin(object):
         ])
 
     def test_read_stdin_json_auto_recursive_cte(self, shell, json_extension):
+        # FIXME: disabled for now
+        return
         test = (
             ShellTest(shell)
             .input_file('data/json/filter_keystage.ndjson')

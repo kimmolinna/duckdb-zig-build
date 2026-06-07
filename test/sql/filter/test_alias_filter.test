@@ -3,9 +3,6 @@
 # group: [filter]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE integers(i INTEGER)
 
 statement ok
@@ -25,6 +22,7 @@ SELECT i % 2 AS k FROM integers WHERE k<>0;
 statement error
 SELECT i % 2 AS k FROM integers WHERE integers.k<>0;
 ----
+<REGEX>:.*Binder Error.*does not have a column.*
 
 # columns take priority
 query I
@@ -54,3 +52,4 @@ SELECT i % 2 AS k FROM integers WHERE k=k;
 statement error
 SELECT i % 2 AS o, COUNT(i) AS c FROM integers WHERE c = 0 GROUP BY o;
 ----
+<REGEX>:.*Binder Error.*cannot contain aggregates.*

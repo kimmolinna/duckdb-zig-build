@@ -2,9 +2,6 @@
 # description: regex extract test
 # group: [string]
 
-statement ok
-PRAGMA enable_verification
-
 query T
 SELECT regexp_extract('foobarbaz', 'b..')
 ----
@@ -44,10 +41,12 @@ baz
 statement error
 SELECT regexp_extract('foobarbaz', '(b..)(b..)', -1)
 ----
+<REGEX>:.*Invalid Input Error: Group index must be.*
 
 statement error
 SELECT regexp_extract('foobarbaz', '(b..)(b..)', 42)
 ----
+<REGEX>:.*Invalid Input Error: Group index must be.*
 
 statement ok
 CREATE TABLE test (s VARCHAR, p VARCHAR, i INT)
@@ -63,6 +62,7 @@ INSERT INTO test VALUES
 statement error
 SELECT regexp_extract(s, p, i) FROM test
 ----
+<REGEX>:.*Invalid Input Error.*must be a constant.*
 
 query T
 SELECT regexp_extract(s, p, 0) FROM test
@@ -85,7 +85,7 @@ bar
 statement error
 SELECT regexp_extract(s, '(b..)(b..)', i) FROM test
 ----
-Invalid Input Error: Group specification field must be a constant!
+<REGEX>:.*Invalid Input Error.*must be a constant.*
 
 # null values
 query T
@@ -106,3 +106,32 @@ NULL
 statement error
 SELECT regexp_extract('foobarbaz', 'b..', '1')
 ----
+<REGEX>:.*Binder Error.*Could not choose a best candidate.*
+
+# 'k' option: keep (return) the input on no match instead of an empty string
+query T
+SELECT regexp_extract('foobarbaz', '(zzz)', 1, 'k')
+----
+foobarbaz
+
+query T
+SELECT regexp_extract('foobarbaz', '(b..)', 1, 'k')
+----
+bar
+
+# 'k' combines with other options
+query T
+SELECT regexp_extract('FOOBARBAZ', '(zzz)', 1, 'ik')
+----
+FOOBARBAZ
+
+query T
+SELECT regexp_extract('FOOBARBAZ', '(b..)', 1, 'ik')
+----
+BAR
+
+# 'k' is rejected by regexp_replace
+statement error
+SELECT regexp_replace('foobarbaz', 'b..', 'X', 'k')
+----
+<REGEX>:.*Option 'k'.*

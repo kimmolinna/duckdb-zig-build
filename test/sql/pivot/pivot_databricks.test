@@ -2,13 +2,7 @@
 # description: Tests from the databricks docs
 # group: [pivot]
 
-# temp table
-require skip_reload
-
 # https://docs.databricks.com/sql/language-manual/sql-ref-syntax-qry-select-pivot.html
-
-statement ok
-PRAGMA enable_verification
 
 statement ok
 CREATE TEMP VIEW sales(year, quarter, region, sales) AS

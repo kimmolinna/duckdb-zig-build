@@ -2,6 +2,7 @@
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/transaction/transaction.hpp"
@@ -10,25 +11,24 @@
 
 namespace duckdb {
 
-PhysicalPositionalScan::PhysicalPositionalScan(vector<LogicalType> types, unique_ptr<PhysicalOperator> left,
-                                               unique_ptr<PhysicalOperator> right)
-    : PhysicalOperator(PhysicalOperatorType::POSITIONAL_SCAN, std::move(types),
-                       MaxValue(left->estimated_cardinality, right->estimated_cardinality)) {
-
+PhysicalPositionalScan::PhysicalPositionalScan(PhysicalPlan &physical_plan, vector<LogicalType> types,
+                                               PhysicalOperator &left, PhysicalOperator &right)
+    : PhysicalOperator(physical_plan, PhysicalOperatorType::POSITIONAL_SCAN, std::move(types),
+                       MaxValue(left.estimated_cardinality, right.estimated_cardinality)) {
 	// Manage the children ourselves
-	if (left->type == PhysicalOperatorType::TABLE_SCAN) {
-		child_tables.emplace_back(std::move(left));
-	} else if (left->type == PhysicalOperatorType::POSITIONAL_SCAN) {
-		auto &left_scan = left->Cast<PhysicalPositionalScan>();
+	if (left.type == PhysicalOperatorType::TABLE_SCAN) {
+		child_tables.emplace_back(left);
+	} else if (left.type == PhysicalOperatorType::POSITIONAL_SCAN) {
+		auto &left_scan = left.Cast<PhysicalPositionalScan>();
 		child_tables = std::move(left_scan.child_tables);
 	} else {
 		throw InternalException("Invalid left input for PhysicalPositionalScan");
 	}
 
-	if (right->type == PhysicalOperatorType::TABLE_SCAN) {
-		child_tables.emplace_back(std::move(right));
-	} else if (right->type == PhysicalOperatorType::POSITIONAL_SCAN) {
-		auto &right_scan = right->Cast<PhysicalPositionalScan>();
+	if (right.type == PhysicalOperatorType::TABLE_SCAN) {
+		child_tables.emplace_back(right);
+	} else if (right.type == PhysicalOperatorType::POSITIONAL_SCAN) {
+		auto &right_scan = right.Cast<PhysicalPositionalScan>();
 		auto &right_tables = right_scan.child_tables;
 		child_tables.reserve(child_tables.size() + right_tables.size());
 		std::move(right_tables.begin(), right_tables.end(), std::back_inserter(child_tables));
@@ -41,7 +41,7 @@ class PositionalScanGlobalSourceState : public GlobalSourceState {
 public:
 	PositionalScanGlobalSourceState(ClientContext &context, const PhysicalPositionalScan &op) {
 		for (const auto &table : op.child_tables) {
-			global_states.emplace_back(table->GetGlobalSourceState(context));
+			global_states.emplace_back(table.get().GetGlobalSourceState(context));
 		}
 	}
 
@@ -55,35 +55,41 @@ public:
 class PositionalTableScanner {
 public:
 	PositionalTableScanner(ExecutionContext &context, PhysicalOperator &table_p, GlobalSourceState &gstate_p)
-	    : table(table_p), global_state(gstate_p), source_offset(0), exhausted(false) {
+	    : table(table_p), global_state(gstate_p), source_count(0), source_offset(0), exhausted(false) {
 		local_state = table.GetLocalSourceState(context, gstate_p);
 		source.Initialize(Allocator::Get(context.client), table.types);
 	}
 
 	idx_t Refill(ExecutionContext &context) {
-		if (source_offset >= source.size()) {
+		if (source_offset >= source_count) {
 			if (!exhausted) {
 				source.Reset();
+				source_count = 0;
 
 				InterruptState interrupt_state;
 				OperatorSourceInput source_input {global_state, *local_state, interrupt_state};
-				auto source_result = table.GetData(context, source, source_input);
-				if (source_result == SourceResultType::BLOCKED) {
-					throw NotImplementedException(
-					    "Unexpected interrupt from table Source in PositionalTableScanner refill");
+				auto source_result = SourceResultType::HAVE_MORE_OUTPUT;
+				while (source_result == SourceResultType::HAVE_MORE_OUTPUT && source_count == 0) {
+					// TODO: this could as well just be propagated further, but for now iterating it is
+					source_result = table.GetData(context, source, source_input);
+					source_count = source.size();
+					if (source_result == SourceResultType::BLOCKED) {
+						throw NotImplementedException(
+						    "Unexpected interrupt from table Source in PositionalTableScanner refill");
+					}
 				}
 			}
 			source_offset = 0;
 		}
 
-		const auto available = source.size() - source_offset;
+		const auto available = source_count - source_offset;
 		if (!available) {
 			if (!exhausted) {
 				source.Reset();
+				source_count = 0;
 				for (idx_t i = 0; i < source.ColumnCount(); ++i) {
 					auto &vec = source.data[i];
-					vec.SetVectorType(VectorType::CONSTANT_VECTOR);
-					ConstantVector::SetNull(vec, true);
+					ConstantVector::SetNull(vec, count_t(STANDARD_VECTOR_SIZE));
 				}
 				exhausted = true;
 			}
@@ -93,7 +99,7 @@ public:
 	}
 
 	idx_t CopyData(ExecutionContext &context, DataChunk &output, const idx_t count, const idx_t col_offset) {
-		if (!source_offset && (source.size() >= count || exhausted)) {
+		if (!source_offset && (source_count >= count || exhausted)) {
 			//	Fast track: aligned and has enough data
 			for (idx_t i = 0; i < source.ColumnCount(); ++i) {
 				output.data[col_offset + i].Reference(source.data[i]);
@@ -103,15 +109,15 @@ public:
 			// Copy data
 			for (idx_t target_offset = 0; target_offset < count;) {
 				const auto needed = count - target_offset;
-				const auto available = exhausted ? needed : (source.size() - source_offset);
-				const auto copy_size = MinValue(needed, available);
-				const auto source_count = source_offset + copy_size;
+				const auto available = exhausted ? needed : (source_count - source_offset);
+				const auto copy_count = MinValue(needed, available);
+				const auto source_end = source_offset + copy_count;
 				for (idx_t i = 0; i < source.ColumnCount(); ++i) {
-					VectorOperations::Copy(source.data[i], output.data[col_offset + i], source_count, source_offset,
+					VectorOperations::Copy(source.data[i], output.data[col_offset + i], source_end, source_offset,
 					                       target_offset);
 				}
-				target_offset += copy_size;
-				source_offset += copy_size;
+				target_offset += copy_count;
+				source_offset += copy_count;
 				Refill(context);
 			}
 		}
@@ -127,6 +133,7 @@ public:
 	GlobalSourceState &global_state;
 	unique_ptr<LocalSourceState> local_state;
 	DataChunk source;
+	idx_t source_count;
 	idx_t source_offset;
 	bool exhausted;
 };
@@ -136,7 +143,7 @@ public:
 	PositionalScanLocalSourceState(ExecutionContext &context, PositionalScanGlobalSourceState &gstate,
 	                               const PhysicalPositionalScan &op) {
 		for (size_t i = 0; i < op.child_tables.size(); ++i) {
-			auto &child = *op.child_tables[i];
+			auto &child = op.child_tables[i];
 			auto &global_state = *gstate.global_states[i];
 			scanners.emplace_back(make_uniq<PositionalTableScanner>(context, child, global_state));
 		}
@@ -154,8 +161,8 @@ unique_ptr<GlobalSourceState> PhysicalPositionalScan::GetGlobalSourceState(Clien
 	return make_uniq<PositionalScanGlobalSourceState>(context, *this);
 }
 
-SourceResultType PhysicalPositionalScan::GetData(ExecutionContext &context, DataChunk &output,
-                                                 OperatorSourceInput &input) const {
+SourceResultType PhysicalPositionalScan::GetDataInternal(ExecutionContext &context, DataChunk &output,
+                                                         OperatorSourceInput &input) const {
 	auto &lstate = input.local_state.Cast<PositionalScanLocalSourceState>();
 
 	// Find the longest source block
@@ -175,7 +182,7 @@ SourceResultType PhysicalPositionalScan::GetData(ExecutionContext &context, Data
 		col_offset += scanner->CopyData(context, output, count, col_offset);
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	return SourceResultType::HAVE_MORE_OUTPUT;
 }
 
@@ -185,7 +192,7 @@ ProgressData PhysicalPositionalScan::GetProgress(ClientContext &context, GlobalS
 	ProgressData res;
 
 	for (size_t t = 0; t < child_tables.size(); ++t) {
-		res.Add(child_tables[t]->GetProgress(context, *gstate.global_states[t]));
+		res.Add(child_tables[t].get().GetProgress(context, *gstate.global_states[t]));
 	}
 
 	return res;
@@ -201,7 +208,7 @@ bool PhysicalPositionalScan::Equals(const PhysicalOperator &other_p) const {
 		return false;
 	}
 	for (size_t i = 0; i < child_tables.size(); ++i) {
-		if (!child_tables[i]->Equals(*other.child_tables[i])) {
+		if (!child_tables[i].get().Equals(other.child_tables[i])) {
 			return false;
 		}
 	}
@@ -212,7 +219,7 @@ bool PhysicalPositionalScan::Equals(const PhysicalOperator &other_p) const {
 vector<const_reference<PhysicalOperator>> PhysicalPositionalScan::GetChildren() const {
 	auto result = PhysicalOperator::GetChildren();
 	for (auto &entry : child_tables) {
-		result.push_back(*entry);
+		result.push_back(entry.get());
 	}
 	return result;
 }

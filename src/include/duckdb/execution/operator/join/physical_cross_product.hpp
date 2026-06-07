@@ -19,8 +19,8 @@ public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::CROSS_PRODUCT;
 
 public:
-	PhysicalCrossProduct(vector<LogicalType> types, unique_ptr<PhysicalOperator> left,
-	                     unique_ptr<PhysicalOperator> right, idx_t estimated_cardinality);
+	PhysicalCrossProduct(PhysicalPlan &physical_plan, vector<LogicalType> types, PhysicalOperator &left,
+	                     PhysicalOperator &right, idx_t estimated_cardinality);
 
 public:
 	// Operator Interface
@@ -40,6 +40,7 @@ protected:
 public:
 	// Sink Interface
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
+	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
 
 	bool IsSink() const override {
@@ -61,7 +62,8 @@ class CrossProductExecutor {
 public:
 	explicit CrossProductExecutor(ColumnDataCollection &rhs);
 
-	OperatorResultType Execute(DataChunk &input, DataChunk &output);
+	OperatorResultType Execute(const DataChunk &input, DataChunk &output);
+	void Reset();
 
 	// returns if the left side is scanned as a constant vector
 	bool ScanLHS() {
@@ -78,8 +80,8 @@ public:
 	}
 
 private:
-	void Reset(DataChunk &input, DataChunk &output);
-	bool NextValue(DataChunk &input, DataChunk &output);
+	void Reset(const DataChunk &input, DataChunk &output);
+	bool NextValue(const DataChunk &input, DataChunk &output);
 
 private:
 	ColumnDataCollection &rhs;

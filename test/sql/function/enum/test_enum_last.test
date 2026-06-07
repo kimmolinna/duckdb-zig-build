@@ -3,9 +3,6 @@
 # group: [enum]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TYPE rainbow AS ENUM ('red', 'orange', 'yellow', 'green', 'blue', 'purple');
 
 query I
@@ -16,3 +13,4 @@ purple
 statement error
 SELECT enum_last('bla')
 ----
+<REGEX>:.*Binder Error.*This function needs an ENUM.*

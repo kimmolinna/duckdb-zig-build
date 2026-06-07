@@ -2,8 +2,6 @@
 # description: Test binding of a WAL with a sequence entry in it
 # group: [attach]
 
-require skip_reload
-
 statement ok
 PRAGMA disable_checkpoint_on_shutdown
 
@@ -12,7 +10,7 @@ PRAGMA wal_autocheckpoint='1TB';
 
 # create a table with hugeints
 statement ok
-attach '__TEST_DIR__/attach_wal_with_sequence.db' as db1;
+attach '{TEST_DIR}/attach_wal_with_sequence.db' as db1;
 
 statement ok
 CREATE SEQUENCE db1.seq;
@@ -39,7 +37,7 @@ statement ok
 DETACH db1
 
 statement ok
-attach '__TEST_DIR__/attach_wal_with_sequence.db' as db2;
+attach '{TEST_DIR}/attach_wal_with_sequence.db' as db2;
 
 statement ok
 INSERT INTO db2.blubb (b) VALUES (100);

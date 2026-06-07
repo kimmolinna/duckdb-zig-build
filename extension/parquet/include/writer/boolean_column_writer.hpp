@@ -8,14 +8,25 @@
 
 #pragma once
 
+#include <string>
+
 #include "writer/primitive_column_writer.hpp"
+#include "column_writer.hpp"
+#include "duckdb/common/string.hpp"
+#include "duckdb/common/typedefs.hpp"
+#include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/vector.hpp"
+#include "writer/parquet_write_stats.hpp"
 
 namespace duckdb {
+class ParquetWriter;
+class Vector;
+class WriteStream;
+struct ParquetColumnSchema;
 
 class BooleanColumnWriter : public PrimitiveColumnWriter {
 public:
-	BooleanColumnWriter(ParquetWriter &writer, idx_t schema_idx, vector<string> schema_path_p, idx_t max_repeat,
-	                    idx_t max_define, bool can_have_nulls);
+	BooleanColumnWriter(ParquetWriter &writer, ParquetColumnSchema &&column_schema, vector<string> schema_path_p);
 	~BooleanColumnWriter() override = default;
 
 public:

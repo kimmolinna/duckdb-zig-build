@@ -4,20 +4,21 @@
 #include "duckdb/parallel/thread_context.hpp"
 namespace duckdb {
 
-PhysicalFilter::PhysicalFilter(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
-                               idx_t estimated_cardinality)
-    : CachingPhysicalOperator(PhysicalOperatorType::FILTER, std::move(types), estimated_cardinality) {
-	D_ASSERT(select_list.size() > 0);
-	if (select_list.size() > 1) {
-		// create a big AND out of the expressions
-		auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
-		for (auto &expr : select_list) {
-			conjunction->children.push_back(std::move(expr));
-		}
-		expression = std::move(conjunction);
-	} else {
+PhysicalFilter::PhysicalFilter(PhysicalPlan &physical_plan, vector<LogicalType> types,
+                               vector<unique_ptr<Expression>> select_list, idx_t estimated_cardinality)
+    : CachingPhysicalOperator(physical_plan, PhysicalOperatorType::FILTER, std::move(types), estimated_cardinality) {
+	D_ASSERT(!select_list.empty());
+	if (select_list.size() == 1) {
 		expression = std::move(select_list[0]);
+		return;
 	}
+
+	// Create a conjunction from the select list.
+	auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
+	for (auto &expr : select_list) {
+		conjunction->GetChildrenMutable().push_back(std::move(expr));
+	}
+	expression = std::move(conjunction);
 }
 
 class FilterState : public CachingOperatorState {
@@ -33,6 +34,14 @@ public:
 	void Finalize(const PhysicalOperator &op, ExecutionContext &context) override {
 		context.thread.profiler.Flush(op);
 	}
+
+	bool SupportsReuse() const override {
+		return true;
+	}
+
+	void Reset() override {
+		ResetCachingState();
+	}
 };
 
 unique_ptr<OperatorState> PhysicalFilter::GetOperatorState(ExecutionContext &context) const {
@@ -46,7 +55,7 @@ OperatorResultType PhysicalFilter::ExecuteInternal(ExecutionContext &context, Da
 	if (result_count == input.size()) {
 		// nothing was filtered: skip adding any selection vectors
 		chunk.Reference(input);
-	} else {
+	} else if (result_count > 0) {
 		chunk.Slice(input, state.sel, result_count);
 	}
 	return OperatorResultType::NEED_MORE_INPUT;

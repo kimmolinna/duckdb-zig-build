@@ -48,19 +48,19 @@ unique_ptr<CreateInfo> CatalogEntry::GetInfo() const {
 }
 
 string CatalogEntry::ToSQL() const {
-	throw InternalException("Unsupported catalog type for ToSQL()");
+	throw InternalException({{"catalog_type", CatalogTypeToString(type)}}, "Unsupported catalog type for ToSQL()");
 }
 
 void CatalogEntry::SetChild(unique_ptr<CatalogEntry> child_p) {
 	child = std::move(child_p);
 	if (child) {
-		child->parent = this;
+		child->parent.store(this);
 	}
 }
 
 unique_ptr<CatalogEntry> CatalogEntry::TakeChild() {
 	if (child) {
-		child->parent = nullptr;
+		child->parent.store(nullptr);
 	}
 	return std::move(child);
 }
@@ -69,7 +69,7 @@ bool CatalogEntry::HasChild() const {
 	return child != nullptr;
 }
 bool CatalogEntry::HasParent() const {
-	return parent != nullptr;
+	return parent.load() != nullptr;
 }
 
 CatalogEntry &CatalogEntry::Child() {
@@ -77,7 +77,11 @@ CatalogEntry &CatalogEntry::Child() {
 }
 
 CatalogEntry &CatalogEntry::Parent() {
-	return *parent;
+	return *parent.load();
+}
+
+const CatalogEntry &CatalogEntry::Parent() const {
+	return *parent.load();
 }
 
 Catalog &CatalogEntry::ParentCatalog() {
@@ -110,6 +114,9 @@ void CatalogEntry::Verify(Catalog &catalog_p) {
 }
 
 void CatalogEntry::Rollback(CatalogEntry &prev_entry) {
+}
+
+void CatalogEntry::OnDrop() {
 }
 
 InCatalogEntry::InCatalogEntry(CatalogType type, Catalog &catalog, string name)

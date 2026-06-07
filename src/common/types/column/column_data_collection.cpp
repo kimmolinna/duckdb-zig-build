@@ -1,3 +1,10 @@
+#include "duckdb/common/vector/array_vector.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/dictionary_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 
 #include "duckdb/common/printer.hpp"
@@ -8,6 +15,7 @@
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/uhugeint.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
 namespace duckdb {
@@ -59,9 +67,10 @@ ColumnDataCollection::ColumnDataCollection(Allocator &allocator_p, vector<Logica
 	allocator = make_shared_ptr<ColumnDataAllocator>(allocator_p);
 }
 
-ColumnDataCollection::ColumnDataCollection(BufferManager &buffer_manager, vector<LogicalType> types_p) {
+ColumnDataCollection::ColumnDataCollection(BufferManager &buffer_manager, vector<LogicalType> types_p,
+                                           ColumnDataCollectionLifetime lifetime) {
 	Initialize(std::move(types_p));
-	allocator = make_shared_ptr<ColumnDataAllocator>(buffer_manager);
+	allocator = make_shared_ptr<ColumnDataAllocator>(buffer_manager, lifetime);
 }
 
 ColumnDataCollection::ColumnDataCollection(shared_ptr<ColumnDataAllocator> allocator_p, vector<LogicalType> types_p) {
@@ -70,8 +79,8 @@ ColumnDataCollection::ColumnDataCollection(shared_ptr<ColumnDataAllocator> alloc
 }
 
 ColumnDataCollection::ColumnDataCollection(ClientContext &context, vector<LogicalType> types_p,
-                                           ColumnDataAllocatorType type)
-    : ColumnDataCollection(make_shared_ptr<ColumnDataAllocator>(context, type), std::move(types_p)) {
+                                           ColumnDataAllocatorType type, ColumnDataCollectionLifetime lifetime)
+    : ColumnDataCollection(make_shared_ptr<ColumnDataAllocator>(context, type, lifetime), std::move(types_p)) {
 	D_ASSERT(!types.empty());
 }
 
@@ -146,16 +155,22 @@ idx_t ColumnDataRow::RowIndex() const {
 //===--------------------------------------------------------------------===//
 // ColumnDataRowCollection
 //===--------------------------------------------------------------------===//
-ColumnDataRowCollection::ColumnDataRowCollection(const ColumnDataCollection &collection) {
+ColumnDataRowCollection::ColumnDataRowCollection(const ColumnDataCollection &collection,
+                                                 const ColumnDataScanProperties properties) {
 	if (collection.Count() == 0) {
 		return;
 	}
 	// read all the chunks
 	ColumnDataScanState temp_scan_state;
-	collection.InitializeScan(temp_scan_state, ColumnDataScanProperties::DISALLOW_ZERO_COPY);
+	collection.InitializeScan(temp_scan_state, properties);
 	while (true) {
 		auto chunk = make_uniq<DataChunk>();
-		collection.InitializeScanChunk(*chunk);
+		// Use default allocator so the chunk is independently usable even after the DB allocator is destroyed
+		if (properties == ColumnDataScanProperties::DISALLOW_ZERO_COPY) {
+			collection.InitializeScanChunk(Allocator::DefaultAllocator(), *chunk);
+		} else {
+			collection.InitializeScanChunk(*chunk);
+		}
 		if (!collection.Scan(temp_scan_state, *chunk)) {
 			break;
 		}
@@ -205,14 +220,23 @@ ColumnDataChunkIterationHelper::ColumnDataChunkIterationHelper(const ColumnDataC
 }
 
 ColumnDataChunkIterationHelper::ColumnDataChunkIterator::ColumnDataChunkIterator(
-    const ColumnDataCollection *collection_p, vector<column_t> column_ids_p)
-    : collection(collection_p), scan_chunk(make_shared_ptr<DataChunk>()), row_index(0) {
+    optional_ptr<const ColumnDataCollection> collection_p, vector<column_t> column_ids_p)
+    : collection(collection_p), scan_chunk(make_uniq<DataChunk>()), row_index(0) {
 	if (!collection) {
 		return;
 	}
 	collection->InitializeScan(scan_state, std::move(column_ids_p));
 	collection->InitializeScanChunk(scan_state, *scan_chunk);
 	collection->Scan(scan_state, *scan_chunk);
+}
+
+ColumnDataChunkIterationHelper::ColumnDataChunkIterator::ColumnDataChunkIterator(
+    ColumnDataChunkIterator &&other) noexcept
+    : row_index(0) {
+	std::swap(collection, other.collection);
+	std::swap(scan_state, other.scan_state);
+	std::swap(scan_chunk, other.scan_chunk);
+	std::swap(row_index, other.row_index);
 }
 
 void ColumnDataChunkIterationHelper::ColumnDataChunkIterator::Next() {
@@ -252,12 +276,13 @@ ColumnDataRowIterationHelper::ColumnDataRowIterationHelper(const ColumnDataColle
     : collection(collection_p) {
 }
 
-ColumnDataRowIterationHelper::ColumnDataRowIterator::ColumnDataRowIterator(const ColumnDataCollection *collection_p)
+ColumnDataRowIterationHelper::ColumnDataRowIterator::ColumnDataRowIterator(const ColumnDataCollection *collection_p,
+                                                                           ColumnDataScanProperties properties)
     : collection(collection_p), scan_chunk(make_shared_ptr<DataChunk>()), current_row(*scan_chunk, 0, 0) {
 	if (!collection) {
 		return;
 	}
-	collection->InitializeScan(scan_state);
+	collection->InitializeScan(scan_state, properties);
 	collection->InitializeScanChunk(*scan_chunk);
 	collection->Scan(scan_state, *scan_chunk);
 }
@@ -326,7 +351,7 @@ void ColumnDataCopyValidity(const UnifiedVectorFormat &source_data, validity_t *
 		validity.SetAllValid(STANDARD_VECTOR_SIZE);
 	}
 	// FIXME: we can do something more optimized here using bitshifts & bitwise ors
-	if (!source_data.validity.AllValid()) {
+	if (source_data.validity.CanHaveNull()) {
 		for (idx_t i = 0; i < copy_count; i++) {
 			auto idx = source_data.sel->get_index(source_offset + i);
 			if (!source_data.validity.RowIsValid(idx)) {
@@ -343,10 +368,10 @@ struct BaseValueCopy {
 	}
 
 	template <class OP>
-	static void Assign(ColumnDataMetaData &meta_data, data_ptr_t target, data_ptr_t source, idx_t target_idx,
+	static void Assign(ColumnDataMetaData &meta_data, data_ptr_t target, const_data_ptr_t source, idx_t target_idx,
 	                   idx_t source_idx) {
 		auto result_data = (T *)target;
-		auto source_data = (T *)source;
+		auto source_data = (const T *)source;
 		result_data[target_idx] = OP::Operation(meta_data, source_data[source_idx]);
 	}
 };
@@ -360,7 +385,7 @@ struct StandardValueCopy : public BaseValueCopy<T> {
 
 struct StringValueCopy : public BaseValueCopy<string_t> {
 	static string_t Operation(ColumnDataMetaData &meta_data, string_t input) {
-		return input.IsInlined() ? input : meta_data.segment.heap->AddBlob(input);
+		return meta_data.segment.heap->AddBlob(input);
 	}
 };
 
@@ -389,7 +414,7 @@ struct StructValueCopy {
 	}
 
 	template <class OP>
-	static void Assign(ColumnDataMetaData &meta_data, data_ptr_t target, data_ptr_t source, idx_t target_idx,
+	static void Assign(ColumnDataMetaData &meta_data, data_ptr_t target, const_data_ptr_t source, idx_t target_idx,
 	                   idx_t source_idx) {
 	}
 };
@@ -417,7 +442,7 @@ static void TemplatedColumnDataCopy(ColumnDataMetaData &meta_data, const Unified
 			// initialize the validity mask to set all to valid
 			result_validity.SetAllValid(STANDARD_VECTOR_SIZE);
 		}
-		if (source_data.validity.AllValid()) {
+		if (source_data.validity.CannotHaveNull()) {
 			// Fast path: all valid
 			for (idx_t i = 0; i < append_count; i++) {
 				auto source_idx = source_data.sel->get_index(offset + i);
@@ -454,10 +479,145 @@ static void ColumnDataCopy(ColumnDataMetaData &meta_data, const UnifiedVectorFor
 	TemplatedColumnDataCopy<StandardValueCopy<T>>(meta_data, source_data, source, offset, copy_count);
 }
 
+bool ColumnDataCopyCompressedStrings(ColumnDataMetaData &meta_data, const VectorDataIndex &current_index,
+                                     VectorDataIndex &child_index, const UnifiedVectorFormat &source_data,
+                                     Vector &source, const idx_t &offset, const idx_t &vector_remaining,
+                                     idx_t &append_count, idx_t &heap_size, data_ptr_t &base_heap_ptr) {
+	// check if we can do the optimization at all
+	switch (source.GetVectorType()) {
+	case VectorType::CONSTANT_VECTOR: {
+		const auto &constant_string = ConstantVector::GetData<string_t>(source)[0];
+		if (ConstantVector::IsNull(source) || constant_string.IsInlined()) {
+			return false; // regular path is OK
+		}
+		heap_size = constant_string.GetSize();
+		break;
+	}
+	case VectorType::DICTIONARY_VECTOR: {
+		const auto dictionary_size = DictionaryVector::DictionarySize(source);
+		if (!dictionary_size.IsValid() || dictionary_size.GetIndex() >= vector_remaining / 2) {
+			return false; // not a dictionary from storage or dictionary too large
+		}
+
+		const auto &dictionary_vector = DictionaryVector::Child(source);
+		const auto dictionary_strings = FlatVector::GetData<string_t>(dictionary_vector);
+		const auto &dictionary_validity = FlatVector::Validity(dictionary_vector);
+
+		// Compute total size needed for dictionary strings
+		const auto dictionary_size_idx = dictionary_size.GetIndex();
+		if (dictionary_validity.CannotHaveNull()) {
+			for (idx_t i = 0; i < dictionary_size_idx; i++) {
+				const auto &dictionary_string = dictionary_strings[i];
+				heap_size += !dictionary_string.IsInlined() * dictionary_string.GetSize();
+			}
+		} else {
+			for (idx_t i = 0; i < dictionary_size_idx; i++) {
+				const auto &dictionary_string = dictionary_strings[i];
+				const auto add_size = dictionary_validity.RowIsValidUnsafe(i) && !dictionary_string.IsInlined();
+				heap_size += add_size * dictionary_string.GetSize();
+			}
+		}
+
+		if (heap_size == 0) {
+			return false; // regular path is OK
+		}
+		break;
+	}
+	default:
+		return false;
+	}
+	D_ASSERT(heap_size != 0);
+
+	auto &segment = meta_data.segment;
+	auto &append_state = meta_data.state;
+
+	// allocate string heap for the compressed strings
+	child_index = segment.AllocateStringHeap(heap_size, meta_data.chunk_data, append_state, child_index);
+	if (!meta_data.GetVectorMetaData().child_index.IsValid()) {
+		meta_data.GetVectorMetaData().child_index = meta_data.segment.AddChildIndex(child_index);
+	}
+	auto &child_segment = segment.GetVectorData(child_index);
+	base_heap_ptr = segment.allocator->GetDataPointer(append_state.current_chunk_state, child_segment.block_id,
+	                                                  child_segment.offset);
+
+	auto &current_segment = segment.GetVectorData(current_index);
+	const auto base_ptr = segment.allocator->GetDataPointer(append_state.current_chunk_state, current_segment.block_id,
+	                                                        current_segment.offset);
+
+	// initialize validity mask
+	auto validity_data = ColumnDataCollectionSegment::GetValidityPointerForWriting(base_ptr, sizeof(string_t));
+	ValidityMask target_validity(validity_data, STANDARD_VECTOR_SIZE);
+	if (current_segment.count == 0) {
+		// first time appending to this vector
+		// all data here is still uninitialized
+		// initialize the validity mask to set all to valid
+		target_validity.SetAllValid(STANDARD_VECTOR_SIZE);
+	}
+
+	// now write the compressed data
+	const auto target_entries = reinterpret_cast<string_t *>(base_ptr);
+	if (source.GetVectorType() == VectorType::CONSTANT_VECTOR) {
+		// copy over the constant string
+		auto constant_string = ConstantVector::GetData<string_t>(source)[0];
+		memcpy(base_heap_ptr, constant_string.GetData(), constant_string.GetSize());
+		constant_string.SetPointer(char_ptr_cast(base_heap_ptr));
+
+		// duplicate it
+		for (idx_t i = 0; i < vector_remaining; i++) {
+			const auto target_idx = current_segment.count + i;
+			target_entries[target_idx] = constant_string;
+		}
+	} else {
+		D_ASSERT(source.GetVectorType() == VectorType::DICTIONARY_VECTOR);
+		const auto dictionary_size = DictionaryVector::DictionarySize(source);
+		const auto &dictionary_vector = DictionaryVector::Child(source);
+		const auto dictionary_strings = FlatVector::GetData<string_t>(dictionary_vector);
+		const auto &dictionary_validity = FlatVector::Validity(dictionary_vector);
+
+		// Copy over dictionary, computing offsets as we go
+		idx_t current_string_offset = 0;
+		idx_t string_offsets[STANDARD_VECTOR_SIZE];
+		const auto dictionary_size_idx = dictionary_size.GetIndex();
+		for (idx_t i = 0; i < dictionary_size_idx; i++) {
+			const auto &dictionary_string = dictionary_strings[i];
+			if (dictionary_validity.RowIsValid(i) && !dictionary_string.IsInlined()) {
+				string_offsets[i] = current_string_offset;
+				memcpy(base_heap_ptr + current_string_offset, dictionary_string.GetPointer(),
+				       dictionary_string.GetSize());
+				current_string_offset += dictionary_string.GetSize();
+			}
+		}
+
+		// Now copy over the string vector, pointing to the new dictionary
+		const auto source_entries = UnifiedVectorFormat::GetData<string_t>(source_data);
+		for (idx_t i = 0; i < vector_remaining; i++) {
+			const auto source_idx = UnsafeNumericCast<idx_t>((*source_data.sel)[offset + i]);
+			const auto target_idx = current_segment.count + i;
+			if (!source_data.validity.RowIsValid(source_idx)) {
+				target_validity.SetInvalid(target_idx);
+				continue;
+			}
+			const auto &source_entry = source_entries[source_idx];
+			auto &target_entry = target_entries[target_idx];
+			target_entry = source_entry;
+			if (!source_entry.IsInlined()) {
+				target_entry.SetPointer(char_ptr_cast(base_heap_ptr + string_offsets[source_idx]));
+#ifdef D_ASSERT_IS_ENABLED
+				if (source.GetType() == LogicalType::VARCHAR) {
+					target_entry.Verify();
+				}
+#endif
+			}
+		}
+	}
+
+	append_count = vector_remaining;
+	return true;
+}
+
 template <>
 void ColumnDataCopy<string_t>(ColumnDataMetaData &meta_data, const UnifiedVectorFormat &source_data, Vector &source,
                               idx_t offset, idx_t copy_count) {
-
 	const auto &allocator_type = meta_data.segment.allocator->GetType();
 	if (allocator_type == ColumnDataAllocatorType::IN_MEMORY_ALLOCATOR ||
 	    allocator_type == ColumnDataAllocatorType::HYBRID) {
@@ -486,85 +646,97 @@ void ColumnDataCopy<string_t>(ColumnDataMetaData &meta_data, const UnifiedVector
 	auto block_size = meta_data.segment.allocator->GetBufferManager().GetBlockSize();
 	while (remaining > 0) {
 		// how many values fit in the current string vector
-		idx_t vector_remaining =
+		const auto vector_remaining =
 		    MinValue<idx_t>(STANDARD_VECTOR_SIZE - segment.GetVectorData(current_index).count, remaining);
 
-		// 'append_count' is less if we cannot fit that amount of non-inlined strings on one buffer-managed block
-		idx_t append_count;
+		idx_t append_count = 0;
 		idx_t heap_size = 0;
-		const auto source_entries = UnifiedVectorFormat::GetData<string_t>(source_data);
-		for (append_count = 0; append_count < vector_remaining; append_count++) {
-			auto source_idx = source_data.sel->get_index(offset + append_count);
-			if (!source_data.validity.RowIsValid(source_idx)) {
-				continue;
+		data_ptr_t base_heap_ptr = nullptr;
+		if (!ColumnDataCopyCompressedStrings(meta_data, current_index, child_index, source_data, source, offset,
+		                                     vector_remaining, append_count, heap_size, base_heap_ptr)) {
+			// 'append_count' is less if we cannot fit that amount of non-inlined strings on one buffer-managed block
+			const auto source_entries = UnifiedVectorFormat::GetData<string_t>(source_data);
+			for (; append_count < vector_remaining; append_count++) {
+				auto source_idx = source_data.sel->get_index(offset + append_count);
+				if (!source_data.validity.RowIsValid(source_idx)) {
+					continue;
+				}
+				const auto &entry = source_entries[source_idx];
+				if (entry.IsInlined()) {
+					continue;
+				}
+				if (heap_size + entry.GetSize() > block_size) {
+					break;
+				}
+				heap_size += entry.GetSize();
 			}
-			const auto &entry = source_entries[source_idx];
-			if (entry.IsInlined()) {
-				continue;
-			}
-			if (heap_size + entry.GetSize() > block_size) {
-				break;
-			}
-			heap_size += entry.GetSize();
-		}
 
-		if (vector_remaining != 0 && append_count == 0) {
-			// The string exceeds Storage::DEFAULT_BLOCK_SIZE, so we allocate one block at a time for long strings.
-			auto source_idx = source_data.sel->get_index(offset + append_count);
-			D_ASSERT(source_data.validity.RowIsValid(source_idx));
-			D_ASSERT(!source_entries[source_idx].IsInlined());
-			D_ASSERT(source_entries[source_idx].GetSize() > block_size);
-			heap_size += source_entries[source_idx].GetSize();
-			append_count++;
-		}
-
-		// allocate string heap for the next 'append_count' strings
-		data_ptr_t heap_ptr = nullptr;
-		if (heap_size != 0) {
-			child_index = segment.AllocateStringHeap(heap_size, meta_data.chunk_data, append_state, child_index);
-			if (!meta_data.GetVectorMetaData().child_index.IsValid()) {
-				meta_data.GetVectorMetaData().child_index = meta_data.segment.AddChildIndex(child_index);
+			if (vector_remaining != 0 && append_count == 0) {
+				// The string exceeds Storage::DEFAULT_BLOCK_SIZE, so we allocate one block at a time for long strings.
+				auto source_idx = source_data.sel->get_index(offset + append_count);
+				D_ASSERT(source_data.validity.RowIsValid(source_idx));
+				D_ASSERT(!source_entries[source_idx].IsInlined());
+				D_ASSERT(source_entries[source_idx].GetSize() > block_size);
+				heap_size += source_entries[source_idx].GetSize();
+				append_count++;
 			}
-			auto &child_segment = segment.GetVectorData(child_index);
-			heap_ptr = segment.allocator->GetDataPointer(append_state.current_chunk_state, child_segment.block_id,
-			                                             child_segment.offset);
+
+			// allocate string heap for the next 'append_count' strings
+			if (heap_size != 0) {
+				child_index = segment.AllocateStringHeap(heap_size, meta_data.chunk_data, append_state, child_index);
+				if (!meta_data.GetVectorMetaData().child_index.IsValid()) {
+					meta_data.GetVectorMetaData().child_index = meta_data.segment.AddChildIndex(child_index);
+				}
+				const auto &child_segment = segment.GetVectorData(child_index);
+				base_heap_ptr = segment.allocator->GetDataPointer(append_state.current_chunk_state,
+				                                                  child_segment.block_id, child_segment.offset);
+			}
+
+			// We get a reference to the "current_segment" only after allocating the string heap above,
+			// because this can resize the vector holding the segments, moving it somewhere else
+			auto &current_segment = segment.GetVectorData(current_index);
+			auto base_ptr = segment.allocator->GetDataPointer(append_state.current_chunk_state,
+			                                                  current_segment.block_id, current_segment.offset);
+			auto validity_data = ColumnDataCollectionSegment::GetValidityPointerForWriting(base_ptr, sizeof(string_t));
+			ValidityMask target_validity(validity_data, STANDARD_VECTOR_SIZE);
+			if (current_segment.count == 0) {
+				// first time appending to this vector
+				// all data here is still uninitialized
+				// initialize the validity mask to set all to valid
+				target_validity.SetAllValid(STANDARD_VECTOR_SIZE);
+			}
+
+			auto target_entries = reinterpret_cast<string_t *>(base_ptr);
+			data_ptr_t heap_ptr = base_heap_ptr;
+			for (idx_t i = 0; i < append_count; i++) {
+				auto source_idx = source_data.sel->get_index(offset + i);
+				auto target_idx = current_segment.count + i;
+				if (!source_data.validity.RowIsValid(source_idx)) {
+					target_validity.SetInvalid(target_idx);
+					continue;
+				}
+				const auto &source_entry = source_entries[source_idx];
+				auto &target_entry = target_entries[target_idx];
+				if (source_entry.IsInlined()) {
+					target_entry = source_entry;
+				} else {
+					D_ASSERT(base_heap_ptr != nullptr);
+					memcpy(heap_ptr, source_entry.GetData(), source_entry.GetSize());
+					target_entry =
+					    string_t(const_char_ptr_cast(heap_ptr), UnsafeNumericCast<uint32_t>(source_entry.GetSize()));
+					heap_ptr += source_entry.GetSize();
+				}
+			}
 		}
 
 		auto &current_segment = segment.GetVectorData(current_index);
-		auto base_ptr = segment.allocator->GetDataPointer(append_state.current_chunk_state, current_segment.block_id,
-		                                                  current_segment.offset);
-		auto validity_data = ColumnDataCollectionSegment::GetValidityPointerForWriting(base_ptr, sizeof(string_t));
-		ValidityMask target_validity(validity_data, STANDARD_VECTOR_SIZE);
-		if (current_segment.count == 0) {
-			// first time appending to this vector
-			// all data here is still uninitialized
-			// initialize the validity mask to set all to valid
-			target_validity.SetAllValid(STANDARD_VECTOR_SIZE);
-		}
-
-		auto target_entries = reinterpret_cast<string_t *>(base_ptr);
-		for (idx_t i = 0; i < append_count; i++) {
-			auto source_idx = source_data.sel->get_index(offset + i);
-			auto target_idx = current_segment.count + i;
-			if (!source_data.validity.RowIsValid(source_idx)) {
-				target_validity.SetInvalid(target_idx);
-				continue;
-			}
-			const auto &source_entry = source_entries[source_idx];
-			auto &target_entry = target_entries[target_idx];
-			if (source_entry.IsInlined()) {
-				target_entry = source_entry;
-			} else {
-				D_ASSERT(heap_ptr != nullptr);
-				memcpy(heap_ptr, source_entry.GetData(), source_entry.GetSize());
-				target_entry =
-				    string_t(const_char_ptr_cast(heap_ptr), UnsafeNumericCast<uint32_t>(source_entry.GetSize()));
-				heap_ptr += source_entry.GetSize();
-			}
-		}
-
 		if (heap_size != 0) {
-			current_segment.swizzle_data.emplace_back(child_index, current_segment.count, append_count);
+#ifdef D_ASSERT_IS_ENABLED
+			const auto &child_segment = segment.GetVectorData(child_index);
+			D_ASSERT(base_heap_ptr == segment.allocator->GetDataPointer(append_state.current_chunk_state,
+			                                                            child_segment.block_id, child_segment.offset));
+#endif
+			current_segment.swizzle_data.emplace_back(child_index, base_heap_ptr, current_segment.count, append_count);
 		}
 
 		current_segment.count += append_count;
@@ -585,10 +757,9 @@ void ColumnDataCopy<string_t>(ColumnDataMetaData &meta_data, const UnifiedVector
 template <>
 void ColumnDataCopy<list_entry_t>(ColumnDataMetaData &meta_data, const UnifiedVectorFormat &source_data, Vector &source,
                                   idx_t offset, idx_t copy_count) {
-
 	auto &segment = meta_data.segment;
 
-	auto &child_vector = ListVector::GetEntry(source);
+	auto &child_vector = ListVector::GetChildMutable(source);
 	auto &child_type = child_vector.GetType();
 
 	if (!meta_data.GetVectorMetaData().child_index.IsValid()) {
@@ -618,15 +789,15 @@ void ColumnDataCopy<list_entry_t>(ColumnDataMetaData &meta_data, const UnifiedVe
 		ListVector::GetConsecutiveChildSelVector(source, sel, offset, copy_count);
 
 		auto sliced_child_vector = Vector(child_vector, sel, info.child_list_info.length);
-		sliced_child_vector.Flatten(info.child_list_info.length);
+		sliced_child_vector.Flatten();
 		info.child_list_info.offset = 0;
 
-		sliced_child_vector.ToUnifiedFormat(info.child_list_info.length, child_vector_data);
+		sliced_child_vector.ToUnifiedFormat(child_vector_data);
 		child_function.function(child_meta_data, child_vector_data, sliced_child_vector, info.child_list_info.offset,
 		                        info.child_list_info.length);
 
 	} else {
-		child_vector.ToUnifiedFormat(info.child_list_info.length, child_vector_data);
+		child_vector.ToUnifiedFormat(child_vector_data);
 		child_function.function(child_meta_data, child_vector_data, child_vector, info.child_list_info.offset,
 		                        info.child_list_info.length);
 	}
@@ -657,21 +828,20 @@ void ColumnDataCopyStruct(ColumnDataMetaData &meta_data, const UnifiedVectorForm
 		ColumnDataMetaData child_meta_data(child_function, meta_data, child_index);
 
 		UnifiedVectorFormat child_data;
-		child_vectors[child_idx]->ToUnifiedFormat(copy_count, child_data);
+		child_vectors[child_idx].ToUnifiedFormat(child_data);
 
-		child_function.function(child_meta_data, child_data, *child_vectors[child_idx], offset, copy_count);
+		child_function.function(child_meta_data, child_data, child_vectors[child_idx], offset, copy_count);
 	}
 }
 
 void ColumnDataCopyArray(ColumnDataMetaData &meta_data, const UnifiedVectorFormat &source_data, Vector &source,
                          idx_t offset, idx_t copy_count) {
-
 	auto &segment = meta_data.segment;
 
 	// copy the NULL values for the main array vector (the same as for a struct vector)
 	TemplatedColumnDataCopy<StructValueCopy>(meta_data, source_data, source, offset, copy_count);
 
-	auto &child_vector = ArrayVector::GetEntry(source);
+	auto &child_vector = ArrayVector::GetChildMutable(source);
 	auto &child_type = child_vector.GetType();
 	auto array_size = ArrayType::GetSize(source.GetType());
 
@@ -691,10 +861,11 @@ void ColumnDataCopyArray(ColumnDataMetaData &meta_data, const UnifiedVectorForma
 
 	UnifiedVectorFormat child_vector_data;
 	ColumnDataMetaData child_meta_data(child_function, meta_data, child_index);
-	child_vector.ToUnifiedFormat(copy_count * array_size, child_vector_data);
+	child_vector.ToUnifiedFormat(child_vector_data);
 
 	// Broadcast and sync the validity of the array vector to the child vector
-
+	// This requires creating a copy of the validity mask: we cannot modify the input validity
+	child_vector_data.validity = ValidityMask(child_vector_data.validity, child_vector_data.validity.Capacity());
 	if (source_data.validity.IsMaskSet()) {
 		for (idx_t i = 0; i < copy_count; i++) {
 			auto source_idx = source_data.sel->get_index(offset + i);
@@ -816,9 +987,9 @@ void ColumnDataCollection::Append(ColumnDataAppendState &state, DataChunk &input
 	auto &segment = *segments.back();
 	for (idx_t vector_idx = 0; vector_idx < types.size(); vector_idx++) {
 		if (IsComplexType(input.data[vector_idx].GetType())) {
-			input.data[vector_idx].Flatten(input.size());
+			input.data[vector_idx].Flatten();
 		}
-		input.data[vector_idx].ToUnifiedFormat(input.size(), state.vector_data[vector_idx]);
+		input.data[vector_idx].ToUnifiedFormat(state.vector_data[vector_idx]);
 	}
 
 	idx_t remaining = input.size();
@@ -867,6 +1038,7 @@ void ColumnDataCollection::InitializeScan(ColumnDataScanState &state, ColumnData
 
 void ColumnDataCollection::InitializeScan(ColumnDataScanState &state, vector<column_t> column_ids,
                                           ColumnDataScanProperties properties) const {
+	state.db = allocator->GetDatabase();
 	state.chunk_index = 0;
 	state.segment_index = 0;
 	state.current_row_index = 0;
@@ -888,6 +1060,7 @@ void ColumnDataCollection::InitializeScan(ColumnDataParallelScanState &state, ve
 
 bool ColumnDataCollection::Scan(ColumnDataParallelScanState &state, ColumnDataLocalScanState &lstate,
                                 DataChunk &result) const {
+	D_ASSERT(result.GetTypes() == types);
 	result.Reset();
 
 	idx_t chunk_index;
@@ -904,7 +1077,11 @@ bool ColumnDataCollection::Scan(ColumnDataParallelScanState &state, ColumnDataLo
 }
 
 void ColumnDataCollection::InitializeScanChunk(DataChunk &chunk) const {
-	chunk.Initialize(allocator->GetAllocator(), types);
+	InitializeScanChunk(allocator->GetAllocator(), chunk);
+}
+
+void ColumnDataCollection::InitializeScanChunk(Allocator &allocator, DataChunk &chunk) const {
+	chunk.Initialize(allocator, types);
 }
 
 void ColumnDataCollection::InitializeScanChunk(ColumnDataScanState &state, DataChunk &chunk) const {
@@ -977,10 +1154,14 @@ void ColumnDataCollection::ScanAtIndex(ColumnDataParallelScanState &state, Colum
 	lstate.current_chunk_state.properties = state.scan_state.properties;
 	segment.ReadChunk(chunk_index, lstate.current_chunk_state, result, state.scan_state.column_ids);
 	lstate.current_row_index = row_index;
-	result.Verify();
+	result.Verify(state.scan_state.db);
 }
 
 bool ColumnDataCollection::Scan(ColumnDataScanState &state, DataChunk &result) const {
+	for (idx_t i = 0; i < state.column_ids.size(); i++) {
+		D_ASSERT(result.GetTypes()[i] == types[state.column_ids[i]]);
+	}
+
 	result.Reset();
 
 	idx_t chunk_index;
@@ -994,7 +1175,7 @@ bool ColumnDataCollection::Scan(ColumnDataScanState &state, DataChunk &result) c
 	auto &segment = *segments[segment_index];
 	state.current_chunk_state.properties = state.properties;
 	segment.ReadChunk(chunk_index, state.current_chunk_state, result, state.column_ids);
-	result.Verify();
+	result.Verify(state.db);
 	return true;
 }
 
@@ -1026,7 +1207,7 @@ bool ColumnDataCollection::Seek(idx_t seek_idx, ColumnDataScanState &state, Data
 	auto &segment = *segments[segment_index];
 	state.current_chunk_state.properties = state.properties;
 	segment.ReadChunk(chunk_index, state.current_chunk_state, result, state.column_ids);
-	result.Verify();
+	result.Verify(state.db);
 	return true;
 }
 
@@ -1053,6 +1234,19 @@ void ColumnDataCollection::Combine(ColumnDataCollection &other) {
 	Verify();
 }
 
+void ColumnDataCollection::Swap(ColumnDataCollection &other) {
+	if (types != other.types) {
+		throw InternalException("Attempting to swap ColumnDataCollections with mismatching types");
+	}
+	std::swap(allocator, other.allocator);
+	std::swap(types, other.types);
+	std::swap(count, other.count);
+	std::swap(segments, other.segments);
+	std::swap(copy_functions, other.copy_functions);
+	std::swap(finished_append, other.finished_append);
+	std::swap(partition_index, other.partition_index);
+}
+
 //===--------------------------------------------------------------------===//
 // Fetch
 //===--------------------------------------------------------------------===//
@@ -1065,6 +1259,7 @@ idx_t ColumnDataCollection::ChunkCount() const {
 }
 
 void ColumnDataCollection::FetchChunk(idx_t chunk_idx, DataChunk &result) const {
+	D_ASSERT(result.GetTypes() == types);
 	D_ASSERT(chunk_idx < ChunkCount());
 	for (auto &segment : segments) {
 		if (chunk_idx >= segment->ChunkCount()) {
@@ -1127,6 +1322,24 @@ void ColumnDataCollection::Reset() {
 	allocator = make_shared_ptr<ColumnDataAllocator>(*allocator);
 }
 
+void ColumnDataCollection::ResetForReuse() {
+	count = 0;
+	finished_append = false;
+	if (segments.empty()) {
+		allocator->Reset();
+		return;
+	}
+
+	for (auto &segment : segments) {
+		segment->Reset();
+	}
+
+	if (segments.size() > 1) {
+		segments.resize(1);
+	}
+	allocator->ResetPreserveLastBlock();
+}
+
 struct ValueResultEquals {
 	bool operator()(const Value &a, const Value &b) const {
 		return Value::DefaultValuesAreEqual(a, b);
@@ -1136,11 +1349,11 @@ struct ValueResultEquals {
 bool ColumnDataCollection::ResultEquals(const ColumnDataCollection &left, const ColumnDataCollection &right,
                                         string &error_message, bool ordered) {
 	if (left.ColumnCount() != right.ColumnCount()) {
-		error_message = "Column count mismatch";
+		error_message = StringUtil::Format("Column count mismatch (%d vs %d)", left.Count(), right.Count());
 		return false;
 	}
 	if (left.Count() != right.Count()) {
-		error_message = "Row count mismatch";
+		error_message = StringUtil::Format("Row count mismatch (%d vs %d)", left.Count(), right.Count());
 		return false;
 	}
 	auto left_rows = left.GetRows();
@@ -1206,6 +1419,11 @@ ColumnDataAllocatorType ColumnDataCollection::GetAllocatorType() const {
 	return allocator->GetType();
 }
 
+BufferManager &ColumnDataCollection::GetBufferManager() const {
+	D_ASSERT(allocator->GetType() == ColumnDataAllocatorType::BUFFER_MANAGER_ALLOCATOR);
+	return allocator->GetBufferManager();
+}
+
 const vector<unique_ptr<ColumnDataCollectionSegment>> &ColumnDataCollection::GetSegments() const {
 	return segments;
 }
@@ -1237,9 +1455,9 @@ unique_ptr<ColumnDataCollection> ColumnDataCollection::Deserialize(Deserializer 
 
 	for (idx_t r = 0; r < values[0].size(); r++) {
 		for (idx_t c = 0; c < types.size(); c++) {
-			chunk.SetValue(c, chunk.size(), values[c][r]);
+			chunk.data[c].Append(values[c][r]);
 		}
-		chunk.SetCardinality(chunk.size() + 1);
+		// the appends above already grow the child vectors, so chunk.size() reflects the new cardinality
 		if (chunk.size() == STANDARD_VECTOR_SIZE) {
 			collection->Append(chunk);
 			chunk.Reset();

@@ -8,19 +8,9 @@
 
 #pragma once
 
-#include "duckdb/storage/compression/chimp/chimp.hpp"
 #include "duckdb/function/compression_function.hpp"
-#include "duckdb/storage/compression/chimp/chimp_analyze.hpp"
-
-#include "duckdb/common/helper.hpp"
-#include "duckdb/common/limits.hpp"
 #include "duckdb/common/types/null_value.hpp"
-#include "duckdb/function/compression/compression.hpp"
-#include "duckdb/main/config.hpp"
-#include "duckdb/storage/buffer_manager.hpp"
-
 #include "duckdb/storage/table/column_data_checkpointer.hpp"
-#include "duckdb/storage/table/column_segment.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 
 #include <functional>
@@ -40,7 +30,7 @@ unique_ptr<CompressionState> ChimpInitCompression(ColumnDataCheckpointData &chec
 }
 
 template <class T>
-void ChimpCompress(CompressionState &state_p, Vector &scan_vector, idx_t count) {
+void ChimpCompress(CompressionState &state_p, const Vector &scan_vector) {
 	throw InternalException("Chimp has been deprecated, can no longer be used to compress data");
 }
 

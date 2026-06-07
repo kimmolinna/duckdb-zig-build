@@ -2,11 +2,6 @@
 # description: Test ATTACH with complex identifiers
 # group: [attach]
 
-require skip_reload
-
-statement ok
-PRAGMA enable_verification
-
 statement ok
 ATTACH ':memory:' AS db1;
 

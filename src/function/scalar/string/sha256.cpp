@@ -5,10 +5,12 @@
 
 namespace duckdb {
 
+namespace {
+
 struct SHA256Operator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
-		auto hash = StringVector::EmptyString(result, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_TEXT);
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
+		auto hash = heap.EmptyString(duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_TEXT);
 
 		duckdb_mbedtls::MbedTlsWrapper::SHA256State state;
 		state.AddString(input.GetString());
@@ -19,11 +21,13 @@ struct SHA256Operator {
 	}
 };
 
-static void SHA256Function(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &input = args.data[0];
+void SHA256Function(DataChunk &args, ExpressionState &state, Vector &result) {
+	const auto &input = args.data[0];
 
-	UnaryExecutor::ExecuteString<string_t, string_t, SHA256Operator>(input, result, args.size());
+	UnaryExecutor::ExecuteString<string_t, string_t, SHA256Operator>(input, result);
 }
+
+} // namespace
 
 ScalarFunctionSet SHA256Fun::GetFunctions() {
 	ScalarFunctionSet set("sha256");

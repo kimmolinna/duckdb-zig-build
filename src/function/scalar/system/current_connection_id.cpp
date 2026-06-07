@@ -7,6 +7,8 @@
 
 namespace duckdb {
 
+namespace {
+
 struct CurrentConnectionIdData : FunctionData {
 	explicit CurrentConnectionIdData(Value connection_id_p) : connection_id(std::move(connection_id_p)) {
 	}
@@ -20,20 +22,22 @@ struct CurrentConnectionIdData : FunctionData {
 	}
 };
 
-unique_ptr<FunctionData> CurrentConnectionIdBind(ClientContext &context, ScalarFunction &bound_function,
-                                                 vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> CurrentConnectionIdBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
 	return make_uniq<CurrentConnectionIdData>(Value::UBIGINT(context.GetConnectionId()));
 }
 
-static void CurrentConnectionIdFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+void CurrentConnectionIdFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	const auto &info = func_expr.bind_info->Cast<CurrentConnectionIdData>();
-	result.Reference(info.connection_id);
+	const auto &info = func_expr.BindInfo()->Cast<CurrentConnectionIdData>();
+	result.Reference(info.connection_id, count_t(args.size()));
 }
+
+} // namespace
 
 ScalarFunction CurrentConnectionId::GetFunction() {
 	return ScalarFunction({}, LogicalType::UBIGINT, CurrentConnectionIdFunction, CurrentConnectionIdBind, nullptr,
-	                      nullptr, nullptr, LogicalType(LogicalTypeId::INVALID), FunctionStability::VOLATILE);
+	                      nullptr, LogicalType(LogicalTypeId::INVALID), FunctionStability::VOLATILE);
 }
 
 } // namespace duckdb

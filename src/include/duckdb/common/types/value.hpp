@@ -18,9 +18,11 @@
 #include "duckdb/common/types/datetime.hpp"
 #include "duckdb/common/types/interval.hpp"
 #include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/insertion_order_preserving_map.hpp"
 
 namespace duckdb {
 
+class String;
 class CastFunctionSet;
 struct GetCastFunctionInput;
 struct ExtraValueInfo;
@@ -34,6 +36,7 @@ class Value {
 	friend struct UnionValue;
 	friend struct ArrayValue;
 	friend struct MapValue;
+	friend struct TypeValue;
 
 public:
 	//! Create an empty NULL value of the specified type
@@ -56,6 +59,8 @@ public:
 	DUCKDB_API Value(string_t val); // NOLINT: Allow implicit conversion from `string_t`
 	//! Create a VARCHAR value
 	DUCKDB_API Value(string val); // NOLINT: Allow implicit conversion from `string`
+	//! Create a VARCHAR value
+	DUCKDB_API Value(String val); // NOLINT: Allow implicit conversion from `string`
 	//! Copy constructor
 	DUCKDB_API Value(const Value &other);
 	//! Move constructor
@@ -127,6 +132,7 @@ public:
 	DUCKDB_API static Value DATE(int32_t year, int32_t month, int32_t day);
 	//! Create a time Value from a specified time
 	DUCKDB_API static Value TIME(dtime_t time);
+	DUCKDB_API static Value TIME_NS(dtime_ns_t time);
 	DUCKDB_API static Value TIMETZ(dtime_tz_t time);
 	//! Create a time Value from a specified time
 	DUCKDB_API static Value TIME(int32_t hour, int32_t min, int32_t sec, int32_t micros);
@@ -142,6 +148,8 @@ public:
 	DUCKDB_API static Value TIMESTAMPNS(timestamp_ns_t timestamp);
 	//! Create a timestamp_tz Value from a specified value.
 	DUCKDB_API static Value TIMESTAMPTZ(timestamp_tz_t timestamp);
+	//! Create a timestamp_tz_ns Value from a specified value.
+	DUCKDB_API static Value TIMESTAMPTZNS(timestamp_tz_ns_t timestamp);
 	//! Create a timestamp Value from a specified timestamp in separate values
 	DUCKDB_API static Value TIMESTAMP(int32_t year, int32_t month, int32_t day, int32_t hour, int32_t min, int32_t sec,
 	                                  int32_t micros);
@@ -163,6 +171,9 @@ public:
 	//! Create a struct value with given list of entries
 	DUCKDB_API static Value STRUCT(child_list_t<Value> values);
 	DUCKDB_API static Value STRUCT(const LogicalType &type, vector<Value> struct_values);
+	DUCKDB_API static Value AGGREGATE_STATE(const LogicalType &type, vector<Value> underlying_struct_values);
+	//! Create a variant value with given list of internal variant data (keys/children/values/data)
+	DUCKDB_API static Value VARIANT(vector<Value> children);
 	//! Create a list value with the given entries
 	DUCKDB_API static Value LIST(const LogicalType &child_type, vector<Value> values);
 	//! Create a list value with the given entries
@@ -176,7 +187,7 @@ public:
 	DUCKDB_API static Value MAP(const LogicalType &key_type, const LogicalType &value_type, vector<Value> keys,
 	                            vector<Value> values);
 	//! Create a map value from a set of key-value pairs
-	DUCKDB_API static Value MAP(const unordered_map<string, string> &kv_pairs);
+	DUCKDB_API static Value MAP(const InsertionOrderPreservingMap<string> &kv_pairs);
 
 	//! Create a union value from a selected value and a tag from a set of alternatives.
 	DUCKDB_API static Value UNION(child_list_t<LogicalType> members, uint8_t tag, Value value);
@@ -191,11 +202,17 @@ public:
 	//! Creates a bitstring by casting a specified string to a bitstring
 	DUCKDB_API static Value BIT(const_data_ptr_t data, idx_t len);
 	DUCKDB_API static Value BIT(const string &data);
-	DUCKDB_API static Value VARINT(const_data_ptr_t data, idx_t len);
-	DUCKDB_API static Value VARINT(const string &data);
+	DUCKDB_API static Value BIGNUM(const_data_ptr_t data, idx_t len);
+	DUCKDB_API static Value BIGNUM(const string &data);
+
+	DUCKDB_API static Value GEOMETRY(const_data_ptr_t data, idx_t len);
+	DUCKDB_API static Value GEOMETRY(const_data_ptr_t data, idx_t len, const CoordinateReferenceSystem &crs);
+
+	DUCKDB_API static Value TYPE(const LogicalType &type);
+	DUCKDB_API static Value TYPE(const string_t &serialized_type);
 
 	//! Creates an aggregate state
-	DUCKDB_API static Value AGGREGATE_STATE(const LogicalType &type, const_data_ptr_t data, idx_t len); // NOLINT
+	DUCKDB_API static Value LEGACY_AGGREGATE_STATE(const LogicalType &type, const_data_ptr_t data, idx_t len); // NOLINT
 
 	template <class T>
 	T GetValue() const;
@@ -326,12 +343,14 @@ private:
 		uint64_t hash;
 		date_t date;
 		dtime_t time;
+		dtime_ns_t time_ns;
 		dtime_tz_t timetz;
 		timestamp_t timestamp;
 		timestamp_sec_t timestamp_s;
 		timestamp_ms_t timestamp_ms;
 		timestamp_ns_t timestamp_ns;
 		timestamp_tz_t timestamp_tz;
+		timestamp_tz_ns_t timestamp_tz_ns;
 		interval_t interval;
 	} value_; // NOLINT
 
@@ -431,6 +450,10 @@ struct TimestampTZValue {
 	DUCKDB_API static timestamp_tz_t Get(const Value &value);
 };
 
+struct TimestampTZNSValue {
+	DUCKDB_API static timestamp_tz_ns_t Get(const Value &value);
+};
+
 struct IntervalValue {
 	DUCKDB_API static interval_t Get(const Value &value);
 };
@@ -455,6 +478,10 @@ struct UnionValue {
 	DUCKDB_API static const Value &GetValue(const Value &value);
 	DUCKDB_API static uint8_t GetTag(const Value &value);
 	DUCKDB_API static const LogicalType &GetType(const Value &value);
+};
+
+struct TypeValue {
+	DUCKDB_API static LogicalType GetType(const Value &value);
 };
 
 //! Return the internal integral value for any type that is stored as an integral value internally
@@ -490,6 +517,8 @@ Value DUCKDB_API Value::CreateValue(date_t value);
 template <>
 Value DUCKDB_API Value::CreateValue(dtime_t value);
 template <>
+Value DUCKDB_API Value::CreateValue(dtime_ns_t value);
+template <>
 Value DUCKDB_API Value::CreateValue(dtime_tz_t value);
 template <>
 Value DUCKDB_API Value::CreateValue(timestamp_t value);
@@ -501,6 +530,8 @@ template <>
 Value DUCKDB_API Value::CreateValue(timestamp_ns_t value);
 template <>
 Value DUCKDB_API Value::CreateValue(timestamp_tz_t value);
+template <>
+Value DUCKDB_API Value::CreateValue(timestamp_tz_ns_t value);
 template <>
 Value DUCKDB_API Value::CreateValue(const char *value);
 template <>
@@ -549,6 +580,8 @@ DUCKDB_API date_t Value::GetValue() const;
 template <>
 DUCKDB_API dtime_t Value::GetValue() const;
 template <>
+DUCKDB_API dtime_ns_t Value::GetValue() const;
+template <>
 DUCKDB_API dtime_tz_t Value::GetValue() const;
 template <>
 DUCKDB_API timestamp_t Value::GetValue() const;
@@ -560,6 +593,8 @@ template <>
 DUCKDB_API timestamp_ns_t Value::GetValue() const;
 template <>
 DUCKDB_API timestamp_tz_t Value::GetValue() const;
+template <>
+DUCKDB_API timestamp_tz_ns_t Value::GetValue() const;
 template <>
 DUCKDB_API interval_t Value::GetValue() const;
 template <>
@@ -600,6 +635,8 @@ DUCKDB_API date_t Value::GetValueUnsafe() const;
 template <>
 DUCKDB_API dtime_t Value::GetValueUnsafe() const;
 template <>
+DUCKDB_API dtime_ns_t Value::GetValueUnsafe() const;
+template <>
 DUCKDB_API dtime_tz_t Value::GetValueUnsafe() const;
 template <>
 DUCKDB_API timestamp_t Value::GetValueUnsafe() const;
@@ -611,6 +648,8 @@ template <>
 DUCKDB_API timestamp_ns_t Value::GetValueUnsafe() const;
 template <>
 DUCKDB_API timestamp_tz_t Value::GetValueUnsafe() const;
+template <>
+DUCKDB_API timestamp_tz_ns_t Value::GetValueUnsafe() const;
 template <>
 DUCKDB_API interval_t Value::GetValueUnsafe() const;
 
@@ -635,5 +674,7 @@ template <>
 DUCKDB_API bool Value::IsFinite(timestamp_ns_t input);
 template <>
 DUCKDB_API bool Value::IsFinite(timestamp_tz_t input);
+template <>
+DUCKDB_API bool Value::IsFinite(timestamp_tz_ns_t input);
 
 } // namespace duckdb

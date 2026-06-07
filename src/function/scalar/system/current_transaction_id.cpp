@@ -8,6 +8,8 @@
 
 namespace duckdb {
 
+namespace {
+
 struct CurrentTransactionIdData : FunctionData {
 	explicit CurrentTransactionIdData(Value transaction_id_p) : transaction_id(std::move(transaction_id_p)) {
 	}
@@ -21,8 +23,8 @@ struct CurrentTransactionIdData : FunctionData {
 	}
 };
 
-unique_ptr<FunctionData> CurrentTransactionIdBind(ClientContext &context, ScalarFunction &bound_function,
-                                                  vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> CurrentTransactionIdBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
 	Value transaction_id;
 	if (context.transaction.HasActiveTransaction()) {
 		transaction_id = Value::UBIGINT(context.transaction.ActiveTransaction().global_transaction_id);
@@ -32,15 +34,17 @@ unique_ptr<FunctionData> CurrentTransactionIdBind(ClientContext &context, Scalar
 	return make_uniq<CurrentTransactionIdData>(transaction_id);
 }
 
-static void CurrentTransactionIdFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+void CurrentTransactionIdFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	const auto &info = func_expr.bind_info->Cast<CurrentTransactionIdData>();
-	result.Reference(info.transaction_id);
+	const auto &info = func_expr.BindInfo()->Cast<CurrentTransactionIdData>();
+	result.Reference(info.transaction_id, count_t(args.size()));
 }
+
+} // namespace
 
 ScalarFunction CurrentTransactionId::GetFunction() {
 	return ScalarFunction({}, LogicalType::UBIGINT, CurrentTransactionIdFunction, CurrentTransactionIdBind, nullptr,
-	                      nullptr, nullptr, LogicalType(LogicalTypeId::INVALID), FunctionStability::VOLATILE);
+	                      nullptr, LogicalType(LogicalTypeId::INVALID), FunctionStability::VOLATILE);
 }
 
 } // namespace duckdb

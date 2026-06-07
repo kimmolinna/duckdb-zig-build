@@ -3,9 +3,6 @@
 # group: [rigger]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 BEGIN TRANSACTION;
 
 statement ok
@@ -221,3 +218,4 @@ PRAGMA disable_optimizer
 statement error
 SELECT * FROM t0 WHERE (('NN')<((t0.rowid NOT IN (t0.c1))));
 ----
+Conversion Error: Could not convert string 'NN' to BOOL

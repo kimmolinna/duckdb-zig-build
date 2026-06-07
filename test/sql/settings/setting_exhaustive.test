@@ -12,7 +12,7 @@ SET debug_window_mode='unknown';
 foreach default_order ASC DESC
 
 statement ok
-SET default_order='${default_order}';
+SET default_order='{default_order}';
 
 statement ok
 SELECT * FROM duckdb_settings();
@@ -28,16 +28,16 @@ SET default_order='unknown';
 statement error
 SET enable_external_access=true
 ----
-<REGEX>:Invalid Input Error.*Cannot change enable_external_access setting.*
+<REGEX>:Invalid Input Error.*Cannot enable external access while database is running.*
 
 # enable_profiling
 statement ok
-SET profile_output='__TEST_DIR__/profile_output'
+SET profile_output='{TEST_DIR}/profile_output.txt'
 
 foreach enable_profiling json query_tree query_tree_optimizer
 
 statement ok
-SET enable_profiling='${enable_profiling}';
+SET enable_profiling='{enable_profiling}';
 
 statement ok
 SELECT * FROM duckdb_settings();
@@ -65,7 +65,7 @@ SET GLOBAL enable_progress_bar=true;
 foreach explain_output all optimized_only physical_only
 
 statement ok
-SET explain_output='${explain_output}';
+SET explain_output='{explain_output}';
 
 statement ok
 SELECT * FROM duckdb_settings();

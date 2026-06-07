@@ -20,11 +20,23 @@ bool SQLLogicParser::OpenFile(const string &path) {
 	return !infile.bad();
 }
 
+void SQLLogicParser::IncludeFile(const string &file_name) {
+	auto include_parser = make_uniq<SQLLogicParser>();
+	auto success = include_parser->OpenFile(file_name);
+	if (!success) {
+		Fail("Failed to open include file %s", file_name);
+	}
+	current_include = std::move(include_parser);
+}
+
 bool SQLLogicParser::EmptyOrComment(const string &line) {
 	return line.empty() || StringUtil::StartsWith(line, "#");
 }
 
 bool SQLLogicParser::NextLineEmptyOrComment() {
+	if (current_include) {
+		return current_include->NextLineEmptyOrComment();
+	}
 	if (current_line + 1 >= lines.size()) {
 		return true;
 	} else {
@@ -33,6 +45,14 @@ bool SQLLogicParser::NextLineEmptyOrComment() {
 }
 
 bool SQLLogicParser::NextStatement() {
+	if (current_include) {
+		auto result = current_include->NextStatement();
+		if (result) {
+			return true;
+		}
+		// finished processing this include - continue processing the main file
+		current_include.reset();
+	}
 	if (seen_statement) {
 		// skip the current statement
 		// but only if we have already seen a statement in the file
@@ -50,10 +70,17 @@ bool SQLLogicParser::NextStatement() {
 }
 
 void SQLLogicParser::NextLine() {
+	if (current_include) {
+		current_include->NextLine();
+		return;
+	}
 	current_line++;
 }
 
 string SQLLogicParser::ExtractStatement() {
+	if (current_include) {
+		return current_include->ExtractStatement();
+	}
 	string statement;
 
 	bool first_line = true;
@@ -74,6 +101,9 @@ string SQLLogicParser::ExtractStatement() {
 }
 
 vector<string> SQLLogicParser::ExtractExpectedResult() {
+	if (current_include) {
+		return current_include->ExtractExpectedResult();
+	}
 	vector<string> result;
 	// skip the result line (----) if we are still reading that
 	if (current_line < lines.size() && lines[current_line] == "----") {
@@ -87,16 +117,23 @@ vector<string> SQLLogicParser::ExtractExpectedResult() {
 	return result;
 }
 
-string SQLLogicParser::ExtractExpectedError(bool expect_ok, bool original_sqlite_test) {
+string SQLLogicParser::ExtractExpectedError(ExpectedResult expected_result, bool original_sqlite_test) {
+	if (current_include) {
+		return current_include->ExtractExpectedError(expected_result, original_sqlite_test);
+	}
+	bool expect_error_message =
+	    expected_result == ExpectedResult::RESULT_ERROR || expected_result == ExpectedResult::RESULT_UNKNOWN;
+
 	// check if there is an expected error at all
 	if (current_line >= lines.size() || lines[current_line] != "----") {
-		if (!expect_ok && !original_sqlite_test) {
-			Fail("Failed to parse statement: statement error needs to have an expected error message");
+		if (expect_error_message && !original_sqlite_test) {
+			Fail("Failed to parse statement: statement error and maybe needs to have an expected error message");
 		}
 		return string();
 	}
-	if (expect_ok) {
-		Fail("Failed to parse statement: only statement error can have an expected error message, not statement ok");
+	if (!expect_error_message) {
+		Fail("Failed to parse statement: only statement error or maybe can have an expected error message, not "
+		     "statement ok");
 	}
 	current_line++;
 	string error;
@@ -116,6 +153,9 @@ void SQLLogicParser::FailRecursive(const string &msg, vector<ExceptionFormatValu
 }
 
 SQLLogicToken SQLLogicParser::Tokenize() {
+	if (current_include) {
+		return current_include->Tokenize();
+	}
 	SQLLogicToken result;
 	if (current_line >= lines.size()) {
 		result.type = SQLLogicTokenType::SQLLOGIC_INVALID;
@@ -155,6 +195,7 @@ bool SQLLogicParser::IsSingleLineStatement(SQLLogicToken &token) {
 	case SQLLogicTokenType::SQLLOGIC_HALT:
 	case SQLLogicTokenType::SQLLOGIC_MODE:
 	case SQLLogicTokenType::SQLLOGIC_SET:
+	case SQLLogicTokenType::SQLLOGIC_RESET:
 	case SQLLogicTokenType::SQLLOGIC_LOOP:
 	case SQLLogicTokenType::SQLLOGIC_FOREACH:
 	case SQLLogicTokenType::SQLLOGIC_CONCURRENT_LOOP:
@@ -162,11 +203,15 @@ bool SQLLogicParser::IsSingleLineStatement(SQLLogicToken &token) {
 	case SQLLogicTokenType::SQLLOGIC_ENDLOOP:
 	case SQLLogicTokenType::SQLLOGIC_REQUIRE:
 	case SQLLogicTokenType::SQLLOGIC_REQUIRE_ENV:
+	case SQLLogicTokenType::SQLLOGIC_TEST_ENV:
 	case SQLLogicTokenType::SQLLOGIC_LOAD:
 	case SQLLogicTokenType::SQLLOGIC_RESTART:
 	case SQLLogicTokenType::SQLLOGIC_RECONNECT:
 	case SQLLogicTokenType::SQLLOGIC_SLEEP:
 	case SQLLogicTokenType::SQLLOGIC_UNZIP:
+	case SQLLogicTokenType::SQLLOGIC_TAGS:
+	case SQLLogicTokenType::SQLLOGIC_CONTINUE:
+	case SQLLogicTokenType::SQLLOGIC_INCLUDE:
 		return true;
 
 	case SQLLogicTokenType::SQLLOGIC_SKIP_IF:
@@ -174,6 +219,44 @@ bool SQLLogicParser::IsSingleLineStatement(SQLLogicToken &token) {
 	case SQLLogicTokenType::SQLLOGIC_INVALID:
 	case SQLLogicTokenType::SQLLOGIC_STATEMENT:
 	case SQLLogicTokenType::SQLLOGIC_QUERY:
+		return false;
+
+	default:
+		throw std::runtime_error("Unknown SQLLogic token found!");
+	}
+}
+
+// (All) Context statements must precede all non-header statements
+bool SQLLogicParser::IsTestCommand(SQLLogicTokenType &type) {
+	switch (type) {
+	case SQLLogicTokenType::SQLLOGIC_QUERY:
+	case SQLLogicTokenType::SQLLOGIC_STATEMENT:
+		return true;
+
+	case SQLLogicTokenType::SQLLOGIC_CONCURRENT_FOREACH:
+	case SQLLogicTokenType::SQLLOGIC_CONCURRENT_LOOP:
+	case SQLLogicTokenType::SQLLOGIC_ENDLOOP:
+	case SQLLogicTokenType::SQLLOGIC_FOREACH:
+	case SQLLogicTokenType::SQLLOGIC_HALT:
+	case SQLLogicTokenType::SQLLOGIC_HASH_THRESHOLD:
+	case SQLLogicTokenType::SQLLOGIC_INVALID:
+	case SQLLogicTokenType::SQLLOGIC_LOAD:
+	case SQLLogicTokenType::SQLLOGIC_LOOP:
+	case SQLLogicTokenType::SQLLOGIC_MODE:
+	case SQLLogicTokenType::SQLLOGIC_ONLY_IF:
+	case SQLLogicTokenType::SQLLOGIC_RECONNECT:
+	case SQLLogicTokenType::SQLLOGIC_REQUIRE:
+	case SQLLogicTokenType::SQLLOGIC_REQUIRE_ENV:
+	case SQLLogicTokenType::SQLLOGIC_RESET:
+	case SQLLogicTokenType::SQLLOGIC_RESTART:
+	case SQLLogicTokenType::SQLLOGIC_SET:
+	case SQLLogicTokenType::SQLLOGIC_SKIP_IF:
+	case SQLLogicTokenType::SQLLOGIC_SLEEP:
+	case SQLLogicTokenType::SQLLOGIC_TAGS:
+	case SQLLogicTokenType::SQLLOGIC_CONTINUE:
+	case SQLLogicTokenType::SQLLOGIC_TEST_ENV:
+	case SQLLogicTokenType::SQLLOGIC_UNZIP:
+	case SQLLogicTokenType::SQLLOGIC_INCLUDE:
 		return false;
 
 	default:
@@ -198,6 +281,8 @@ SQLLogicTokenType SQLLogicParser::CommandToToken(const string &token) {
 		return SQLLogicTokenType::SQLLOGIC_MODE;
 	} else if (token == "set") {
 		return SQLLogicTokenType::SQLLOGIC_SET;
+	} else if (token == "reset") {
+		return SQLLogicTokenType::SQLLOGIC_RESET;
 	} else if (token == "loop") {
 		return SQLLogicTokenType::SQLLOGIC_LOOP;
 	} else if (token == "concurrentloop") {
@@ -212,6 +297,8 @@ SQLLogicTokenType SQLLogicParser::CommandToToken(const string &token) {
 		return SQLLogicTokenType::SQLLOGIC_REQUIRE;
 	} else if (token == "require-env") {
 		return SQLLogicTokenType::SQLLOGIC_REQUIRE_ENV;
+	} else if (token == "test-env") {
+		return SQLLogicTokenType::SQLLOGIC_TEST_ENV;
 	} else if (token == "load") {
 		return SQLLogicTokenType::SQLLOGIC_LOAD;
 	} else if (token == "restart") {
@@ -222,6 +309,12 @@ SQLLogicTokenType SQLLogicParser::CommandToToken(const string &token) {
 		return SQLLogicTokenType::SQLLOGIC_SLEEP;
 	} else if (token == "unzip") {
 		return SQLLogicTokenType::SQLLOGIC_UNZIP;
+	} else if (token == "tags") {
+		return SQLLogicTokenType::SQLLOGIC_TAGS;
+	} else if (token == "continue") {
+		return SQLLogicTokenType::SQLLOGIC_CONTINUE;
+	} else if (token == "include") {
+		return SQLLogicTokenType::SQLLOGIC_INCLUDE;
 	}
 	Fail("Unrecognized parameter %s", token);
 	return SQLLogicTokenType::SQLLOGIC_INVALID;

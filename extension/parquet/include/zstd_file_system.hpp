@@ -8,16 +8,21 @@
 
 #pragma once
 
+#include <stdint.h>
+#include <string>
+
 #include "duckdb.hpp"
-#ifndef DUCKDB_AMALGAMATION
 #include "duckdb/common/compressed_file_system.hpp"
-#endif
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/typedefs.hpp"
+#include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
 class ZStdFileSystem : public CompressedFileSystem {
 public:
-	unique_ptr<FileHandle> OpenCompressedFile(unique_ptr<FileHandle> handle, bool write) override;
+	unique_ptr<FileHandle> OpenCompressedFile(QueryContext context, unique_ptr<FileHandle> handle, bool write) override;
 
 	std::string GetName() const override {
 		return "ZStdFileSystem";

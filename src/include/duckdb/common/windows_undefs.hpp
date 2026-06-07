@@ -43,4 +43,20 @@
 #undef UUID
 #endif
 
+#ifdef interface
+#undef interface
+#endif
+
+#ifdef OPTIONAL
+#undef OPTIONAL
+#endif
+
+#ifdef LIST
+#undef LIST
+#endif
+
+#ifdef DELETE
+#undef DELETE
+#endif
+
 #endif

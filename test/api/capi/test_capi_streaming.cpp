@@ -2,7 +2,6 @@
 #include "duckdb.h"
 
 using namespace duckdb;
-using namespace std;
 
 TEST_CASE("Test streaming results in C API", "[capi]") {
 	CAPITester tester;
@@ -29,6 +28,7 @@ TEST_CASE("Test streaming results in C API", "[capi]") {
 	auto chunk = result->StreamChunk();
 
 	idx_t value = duckdb::DConstants::INVALID_INDEX;
+	idx_t result_count = 0;
 	while (chunk) {
 		auto old_value = value;
 
@@ -40,6 +40,9 @@ TEST_CASE("Test streaming results in C API", "[capi]") {
 			// one.
 			REQUIRE(value > old_value);
 		}
+		REQUIRE(chunk->size() > 0);
+		result_count += chunk->size();
+		REQUIRE(result_count <= 1000000);
 		chunk = result->StreamChunk();
 	}
 }

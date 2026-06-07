@@ -8,7 +8,11 @@
 
 #pragma once
 
+#include "duckdb/catalog/catalog_entry/trigger_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/catalog/standard_entry.hpp"
+#include "duckdb/common/enums/column_segment_info_scan_type.hpp"
+#include "duckdb/common/enums/trigger_type.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/parser/constraint.hpp"
@@ -23,10 +27,14 @@
 namespace duckdb {
 
 class DataTable;
+struct CreateTriggerInfo;
 
 struct RenameColumnInfo;
+struct RenameFieldInfo;
 struct AddColumnInfo;
+struct AddFieldInfo;
 struct RemoveColumnInfo;
+struct RemoveFieldInfo;
 struct SetDefaultInfo;
 struct ChangeColumnTypeInfo;
 struct AlterForeignKeyInfo;
@@ -38,9 +46,11 @@ struct BoundCreateTableInfo;
 
 class TableFunction;
 struct FunctionData;
+struct EntryLookupInfo;
 
 class Binder;
 struct ColumnSegmentInfo;
+struct ColumnSegmentInfoScanState;
 class TableStorageInfo;
 
 class LogicalGet;
@@ -91,9 +101,12 @@ public:
 	//! If if_column_exists is true, returns DConstants::INVALID_INDEX
 	//! If if_column_exists is false, throws an exception
 	DUCKDB_API LogicalIndex GetColumnIndex(string &name, bool if_exists = false) const;
+	DUCKDB_API StorageIndex GetStorageIndex(const ColumnIndex &column_index) const;
 
 	//! Returns the scan function that can be used to scan the given table
 	virtual TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) = 0;
+	virtual TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
+	                                      const EntryLookupInfo &lookup_info);
 
 	virtual bool IsDuckTable() const {
 		return false;
@@ -105,7 +118,14 @@ public:
 	static string ColumnNamesToSQL(const ColumnList &columns);
 
 	//! Returns a list of segment information for this table, if exists
-	virtual vector<ColumnSegmentInfo> GetColumnSegmentInfo();
+	virtual vector<ColumnSegmentInfo>
+	GetColumnSegmentInfo(const QueryContext &context,
+	                     const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {});
+	//! Initialize an incremental scan over the table's column segment info.
+	virtual void InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state);
+	//! Append the next row group's column segment info to result. Returns false when no row groups remain.
+	virtual bool ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
+	                                   vector<ColumnSegmentInfo> &result);
 
 	//! Returns the storage info of this table
 	virtual TableStorageInfo GetStorageInfo(ClientContext &context) = 0;
@@ -120,6 +140,17 @@ public:
 
 	//! Returns the virtual columns for this table
 	virtual virtual_column_map_t GetVirtualColumns() const;
+
+	virtual vector<column_t> GetRowIdColumns() const;
+
+	//! Create a trigger on this table (throws for table types that don't support triggers)
+	virtual optional_ptr<CatalogEntry> CreateTrigger(CatalogTransaction transaction, CreateTriggerInfo &info);
+	//! Scan all triggers on this table (default: no-op - non-DuckDB tables have no triggers)
+	virtual void ScanTriggers(CatalogTransaction transaction,
+	                          const std::function<void(CatalogEntry &)> &callback) const;
+	//! Collect triggers matching the given timing and event type
+	vector<const_reference<TriggerCatalogEntry>>
+	GetTriggersForEvent(CatalogTransaction transaction, TriggerTiming timing, TriggerEventType event_type) const;
 
 protected:
 	//! A list of columns that are part of this table

@@ -7,10 +7,10 @@
 
 namespace duckdb {
 
-static void ListFlattenFunction(DataChunk &args, ExpressionState &, Vector &result) {
+namespace {
 
-	const auto flat_list_data = FlatVector::GetData<list_entry_t>(result);
-	auto &flat_list_mask = FlatVector::Validity(result);
+void ListFlattenFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	auto flat_list_data = FlatVector::Writer<list_entry_t>(result, args.size());
 
 	UnifiedVectorFormat outer_format;
 	UnifiedVectorFormat inner_format;
@@ -19,7 +19,7 @@ static void ListFlattenFunction(DataChunk &args, ExpressionState &, Vector &resu
 	// Setup outer vec;
 	auto &outer_vec = args.data[0];
 	const auto outer_count = args.size();
-	outer_vec.ToUnifiedFormat(outer_count, outer_format);
+	outer_vec.ToUnifiedFormat(outer_format);
 
 	// Special case: outer list is all-null
 	if (outer_vec.GetType().id() == LogicalTypeId::SQLNULL) {
@@ -28,31 +28,25 @@ static void ListFlattenFunction(DataChunk &args, ExpressionState &, Vector &resu
 	}
 
 	// Setup inner vec
-	auto &inner_vec = ListVector::GetEntry(outer_vec);
-	const auto inner_count = ListVector::GetListSize(outer_vec);
-	inner_vec.ToUnifiedFormat(inner_count, inner_format);
+	auto &inner_vec = ListVector::GetChildMutable(outer_vec);
+	inner_vec.ToUnifiedFormat(inner_format);
 
 	// Special case: inner list is all-null
 	if (inner_vec.GetType().id() == LogicalTypeId::SQLNULL) {
 		for (idx_t outer_raw_idx = 0; outer_raw_idx < outer_count; outer_raw_idx++) {
 			const auto outer_idx = outer_format.sel->get_index(outer_raw_idx);
 			if (!outer_format.validity.RowIsValid(outer_idx)) {
-				flat_list_mask.SetInvalid(outer_raw_idx);
+				flat_list_data.WriteNull();
 				continue;
 			}
-			flat_list_data[outer_raw_idx].offset = 0;
-			flat_list_data[outer_raw_idx].length = 0;
-		}
-		if (args.AllConstant()) {
-			result.SetVectorType(VectorType::CONSTANT_VECTOR);
+			flat_list_data.WriteValue(list_entry_t(0, 0));
 		}
 		return;
 	}
 
 	// Setup items vec
-	auto &items_vec = ListVector::GetEntry(inner_vec);
-	const auto items_count = ListVector::GetListSize(inner_vec);
-	items_vec.ToUnifiedFormat(items_count, items_format);
+	auto &items_vec = ListVector::GetChildMutable(inner_vec);
+	items_vec.ToUnifiedFormat(items_format);
 
 	// First pass: Figure out the total amount of items.
 	// This can be more than items_count if the inner list reference the same item(s) multiple times.
@@ -95,7 +89,7 @@ static void ListFlattenFunction(DataChunk &args, ExpressionState &, Vector &resu
 		const auto outer_idx = outer_format.sel->get_index(outer_raw_idx);
 
 		if (!outer_format.validity.RowIsValid(outer_idx)) {
-			flat_list_mask.SetInvalid(outer_raw_idx);
+			flat_list_data.WriteNull();
 			continue;
 		}
 
@@ -125,67 +119,18 @@ static void ListFlattenFunction(DataChunk &args, ExpressionState &, Vector &resu
 		}
 
 		// Assign the result list entry
-		flat_list_data[outer_raw_idx] = list_entry;
+		flat_list_data.WriteValue(list_entry);
 	}
 
-	// Now assing the result
+	// Now assign the result
 	ListVector::SetListSize(result, sel_idx);
 
-	auto &result_child_vector = ListVector::GetEntry(result);
+	auto &result_child_vector = ListVector::GetChildMutable(result);
 	result_child_vector.Slice(items_vec, sel, sel_idx);
-	result_child_vector.Flatten(sel_idx);
-
-	if (args.AllConstant()) {
-		result.SetVectorType(VectorType::CONSTANT_VECTOR);
-	}
+	result_child_vector.Flatten();
 }
 
-static unique_ptr<FunctionData> ListFlattenBind(ClientContext &context, ScalarFunction &bound_function,
-                                                vector<unique_ptr<Expression>> &arguments) {
-	D_ASSERT(bound_function.arguments.size() == 1);
-
-	if (arguments[0]->return_type.id() == LogicalTypeId::ARRAY) {
-		auto child_type = ArrayType::GetChildType(arguments[0]->return_type);
-		if (child_type.id() == LogicalTypeId::ARRAY) {
-			child_type = LogicalType::LIST(ArrayType::GetChildType(child_type));
-		}
-		arguments[0] =
-		    BoundCastExpression::AddCastToType(context, std::move(arguments[0]), LogicalType::LIST(child_type));
-	} else if (arguments[0]->return_type.id() == LogicalTypeId::LIST) {
-		auto child_type = ListType::GetChildType(arguments[0]->return_type);
-		if (child_type.id() == LogicalTypeId::ARRAY) {
-			child_type = LogicalType::LIST(ArrayType::GetChildType(child_type));
-			arguments[0] =
-			    BoundCastExpression::AddCastToType(context, std::move(arguments[0]), LogicalType::LIST(child_type));
-		}
-	}
-
-	auto &input_type = arguments[0]->return_type;
-	bound_function.arguments[0] = input_type;
-	if (input_type.id() == LogicalTypeId::UNKNOWN) {
-		bound_function.arguments[0] = LogicalType(LogicalTypeId::UNKNOWN);
-		bound_function.return_type = LogicalType(LogicalTypeId::SQLNULL);
-		return nullptr;
-	}
-	D_ASSERT(input_type.id() == LogicalTypeId::LIST);
-
-	auto child_type = ListType::GetChildType(input_type);
-	if (child_type.id() == LogicalType::SQLNULL) {
-		bound_function.return_type = input_type;
-		return make_uniq<VariableReturnBindData>(bound_function.return_type);
-	}
-	if (child_type.id() == LogicalTypeId::UNKNOWN) {
-		bound_function.arguments[0] = LogicalType(LogicalTypeId::UNKNOWN);
-		bound_function.return_type = LogicalType(LogicalTypeId::SQLNULL);
-		return nullptr;
-	}
-	D_ASSERT(child_type.id() == LogicalTypeId::LIST);
-
-	bound_function.return_type = child_type;
-	return make_uniq<VariableReturnBindData>(bound_function.return_type);
-}
-
-static unique_ptr<BaseStatistics> ListFlattenStats(ClientContext &context, FunctionStatisticsInput &input) {
+unique_ptr<BaseStatistics> ListFlattenStats(ClientContext &context, FunctionStatisticsInput &input) {
 	auto &child_stats = input.child_stats;
 	auto &list_child_stats = ListStats::GetChildStats(child_stats[0]);
 	auto child_copy = list_child_stats.Copy();
@@ -193,9 +138,12 @@ static unique_ptr<BaseStatistics> ListFlattenStats(ClientContext &context, Funct
 	return child_copy.ToUnique();
 }
 
+} // namespace
+
 ScalarFunction ListFlattenFun::GetFunction() {
-	return ScalarFunction({LogicalType::LIST(LogicalType::LIST(LogicalType::ANY))}, LogicalType::LIST(LogicalType::ANY),
-	                      ListFlattenFunction, ListFlattenBind, nullptr, ListFlattenStats);
+	return ScalarFunction({LogicalType::LIST(LogicalType::LIST(LogicalType::TEMPLATE("T")))},
+	                      LogicalType::LIST(LogicalType::TEMPLATE("T")), ListFlattenFunction, nullptr,
+	                      ListFlattenStats);
 }
 
 } // namespace duckdb

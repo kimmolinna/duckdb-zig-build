@@ -3,25 +3,36 @@
 #include "duckdb/common/enums/join_type.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/pair.hpp"
+#include "duckdb/optimizer/join_order/cardinality_estimator.hpp"
 #include "duckdb/optimizer/join_order/cost_model.hpp"
 #include "duckdb/optimizer/join_order/plan_enumerator.hpp"
 #include "duckdb/planner/expression/list.hpp"
 #include "duckdb/planner/operator/list.hpp"
+#include "duckdb/main/settings.hpp"
 
 namespace duckdb {
 
-JoinOrderOptimizer::JoinOrderOptimizer(ClientContext &context) : context(context), query_graph_manager(context) {
+JoinOrderOptimizer::JoinOrderOptimizer(ClientContext &context)
+    : context(context), query_graph_manager(context), depth(1) {
 }
 
 JoinOrderOptimizer JoinOrderOptimizer::CreateChildOptimizer() {
 	JoinOrderOptimizer child_optimizer(context);
 	child_optimizer.materialized_cte_stats = materialized_cte_stats;
 	child_optimizer.delim_scan_stats = delim_scan_stats;
+	child_optimizer.depth = depth + 1;
+	child_optimizer.recursive_cte_indexes = recursive_cte_indexes;
 	return child_optimizer;
 }
 
 unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOperator> plan,
                                                          optional_ptr<RelationStats> stats) {
+	auto max_expression_depth = Settings::Get<MaxExpressionDepthSetting>(query_graph_manager.context);
+	if (depth > max_expression_depth) {
+		// Very deep plans will eventually consume quite some stack space
+		// Returning the current plan is always a valid choice
+		return plan;
+	}
 
 	// make sure query graph manager has not extracted a relation graph already
 	LogicalOperator *op = plan.get();
@@ -36,7 +47,9 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 
 	if (reorderable) {
 		// query graph now has filters and relations
-		auto cost_model = CostModel(query_graph_manager);
+		auto cardinality_estimator =
+		    CardinalityEstimator(query_graph_manager.set_manager, query_graph_manager.GetPredicateModel());
+		auto cost_model = CostModel(query_graph_manager, cardinality_estimator);
 
 		// Initialize a plan enumerator.
 		auto plan_enumerator =
@@ -76,14 +89,14 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 	return new_logical_plan;
 }
 
-void JoinOrderOptimizer::AddMaterializedCTEStats(idx_t index, RelationStats &&stats) {
+void JoinOrderOptimizer::AddMaterializedCTEStats(TableIndex index, RelationStats &&stats) {
 	materialized_cte_stats.emplace(index, std::move(stats));
 }
 
-RelationStats JoinOrderOptimizer::GetMaterializedCTEStats(idx_t index) {
+RelationStats JoinOrderOptimizer::GetMaterializedCTEStats(TableIndex index) {
 	auto it = materialized_cte_stats.find(index);
 	if (it == materialized_cte_stats.end()) {
-		throw InternalException("Unable to find materialized CTE stats with index %llu", index);
+		throw InternalException("Unable to find materialized CTE stats with index %llu", index.index);
 	}
 	return it->second;
 }

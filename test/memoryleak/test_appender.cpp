@@ -1,9 +1,9 @@
 #include "catch.hpp"
 #include "test_helpers.hpp"
 #include "duckdb/main/config.hpp"
+#include "test_config.hpp"
 
 using namespace duckdb;
-using namespace std;
 
 void rand_str(char *dest, idx_t length) {
 	char charset[] = "0123456789"
@@ -18,7 +18,7 @@ void rand_str(char *dest, idx_t length) {
 }
 
 TEST_CASE("Test repeated appending small chunks to a table", "[memoryleak]") {
-	if (!TestMemoryLeaks()) {
+	if (!TestConfiguration::TestMemoryLeaks()) {
 		return;
 	}
 	duckdb_database db;

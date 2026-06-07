@@ -7,38 +7,43 @@
 #include "duckdb/planner/expression/bound_expanded_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_parameter_expression.hpp"
-#include "duckdb/planner/expression_binder/aggregate_binder.hpp"
 #include "duckdb/planner/expression_binder/select_binder.hpp"
 #include "duckdb/planner/query_node/bound_select_node.hpp"
 #include "duckdb/planner/expression/bound_unnest_expression.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/main/settings.hpp"
 
 namespace duckdb {
 
-unique_ptr<Expression> CreateBoundStructExtract(ClientContext &context, unique_ptr<Expression> expr, string key) {
+static unique_ptr<Expression> CreateBoundStructExtract(ClientContext &context, unique_ptr<Expression> expr,
+                                                       const vector<string> &key_path, bool keep_parent_names) {
 	vector<unique_ptr<Expression>> arguments;
 	arguments.push_back(std::move(expr));
-	arguments.push_back(make_uniq<BoundConstantExpression>(Value(key)));
-	auto extract_function = GetKeyExtractFunction();
-	auto bind_info = extract_function.bind(context, extract_function, arguments);
-	auto return_type = extract_function.return_type;
-	auto result = make_uniq<BoundFunctionExpression>(return_type, std::move(extract_function), std::move(arguments),
-	                                                 std::move(bind_info));
-	result->SetAlias(std::move(key));
+	arguments.push_back(make_uniq<BoundConstantExpression>(Value(key_path.back())));
+	auto result = GetKeyExtractFunction().Bind(context, std::move(arguments));
+
+	if (keep_parent_names) {
+		auto alias = StringUtil::Join(key_path, ".");
+		if (!alias.empty() && alias[0] == '.') {
+			alias = alias.substr(1);
+		}
+		result->SetAlias(alias);
+	} else {
+		result->SetAlias(key_path[0]);
+	}
 	return std::move(result);
 }
 
-unique_ptr<Expression> CreateBoundStructExtractIndex(ClientContext &context, unique_ptr<Expression> expr, idx_t key) {
+static unique_ptr<Expression> CreateBoundStructExtractIndex(ClientContext &context, unique_ptr<Expression> expr,
+                                                            idx_t key) {
 	vector<unique_ptr<Expression>> arguments;
 	arguments.push_back(std::move(expr));
 	arguments.push_back(make_uniq<BoundConstantExpression>(Value::BIGINT(int64_t(key))));
-	auto extract_function = GetIndexExtractFunction();
-	auto bind_info = extract_function.bind(context, extract_function, arguments);
-	auto return_type = extract_function.return_type;
-	auto result = make_uniq<BoundFunctionExpression>(return_type, std::move(extract_function), std::move(arguments),
-	                                                 std::move(bind_info));
+	auto result = GetIndexExtractFunction().Bind(context, std::move(arguments));
+
 	result->SetAlias("element" + to_string(key));
 	return std::move(result);
 }
@@ -63,38 +68,37 @@ BindResult SelectBinder::BindUnnest(FunctionExpression &function, idx_t depth, b
 	}
 
 	ErrorData error;
-	if (function.children.empty()) {
-		return BindResult(BinderException(function, "UNNEST() requires a single argument"));
+	if (function.GetArguments().empty()) {
+		return BindResult(BinderException(function, "UNNEST() requires at lease one argument"));
 	}
-	if (inside_window) {
+	if (inside_window || inside_aggregate || inside_try) {
 		return BindResult(BinderException(function, UnsupportedUnnestMessage()));
 	}
 
-	if (function.distinct || function.filter || !function.order_bys->orders.empty()) {
+	if (function.Distinct() || function.Filter() || !function.OrderBy()->orders.empty()) {
 		throw InvalidInputException("\"DISTINCT\", \"FILTER\", and \"ORDER BY\" are not "
 		                            "applicable to \"UNNEST\"");
 	}
 
 	idx_t max_depth = 1;
-	if (function.children.size() != 1) {
-		bool has_parameter = false;
+	bool keep_parent_names = false;
+	auto &args = function.GetArgumentsMutable();
+
+	if (args.size() != 1) {
 		bool supported_argument = false;
-		for (idx_t i = 1; i < function.children.size(); i++) {
-			if (has_parameter) {
-				return BindResult(BinderException(function, "UNNEST() only supports a single additional argument"));
-			}
-			if (function.children[i]->HasParameter()) {
+		for (idx_t i = 1; i < args.size(); i++) {
+			if (args[i].GetExpression().HasParameter()) {
 				throw ParameterNotAllowedException("Parameter not allowed in unnest parameter");
 			}
-			if (!function.children[i]->IsScalar()) {
+			if (!args[i].GetExpression().IsScalar()) {
 				break;
 			}
-			auto alias = StringUtil::Lower(function.children[i]->GetAlias());
-			BindChild(function.children[i], depth, error);
+			auto alias = StringUtil::Lower(args[i].GetExpression().GetAlias());
+			BindChild(args[i].GetExpressionMutable(), depth, error);
 			if (error.HasError()) {
 				return BindResult(std::move(error));
 			}
-			auto &const_child = BoundExpression::GetExpression(*function.children[i]);
+			auto &const_child = BoundExpression::GetExpression(*args[i].GetExpressionMutable());
 			auto value = ExpressionExecutor::EvaluateScalar(context, *const_child, true);
 			if (alias == "recursive") {
 				auto recursive = value.GetValue<bool>();
@@ -106,33 +110,36 @@ BindResult SelectBinder::BindUnnest(FunctionExpression &function, idx_t depth, b
 				if (max_depth == 0) {
 					throw BinderException("UNNEST cannot have a max depth of 0");
 				}
+			} else if (alias == "keep_parent_names") {
+				keep_parent_names = value.GetValue<bool>();
 			} else if (!alias.empty()) {
 				throw BinderException("Unsupported parameter \"%s\" for unnest", alias);
 			} else {
 				break;
 			}
-			has_parameter = true;
 			supported_argument = true;
 		}
 		if (!supported_argument) {
-			return BindResult(BinderException(function, "UNNEST - unsupported extra argument, unnest only supports "
-			                                            "recursive := [true/false] or max_depth := #"));
+			return BindResult(BinderException(
+			    function, "UNNEST - unsupported extra argument, unnest only supports "
+			              "recursive := [true/false], max_depth := # or keep_parent_names := [true/false]"));
 		}
 	}
 	unnest_level++;
-	BindChild(function.children[0], depth, error);
+	BindChild(args[0].GetExpressionMutable(), depth, error);
 	if (error.HasError()) {
 		// failed to bind
 		// try to bind correlated columns manually
-		auto result = BindCorrelatedColumns(function.children[0], error);
+		auto result = BindCorrelatedColumns(args[0].GetExpressionMutable(), error);
 		if (result.HasError()) {
 			return BindResult(result.error);
 		}
-		auto &bound_expr = BoundExpression::GetExpression(*function.children[0]);
+		auto &bound_expr = BoundExpression::GetExpression(*args[0].GetExpressionMutable());
 		ExtractCorrelatedExpressions(binder, *bound_expr);
 	}
-	auto &child = BoundExpression::GetExpression(*function.children[0]);
-	auto &child_type = child->return_type;
+	auto &child = BoundExpression::GetExpression(*args[0].GetExpressionMutable());
+	child = BoundCastExpression::AddArrayCastToList(context, std::move(child));
+	auto &child_type = child->GetReturnType();
 	unnest_level--;
 
 	if (unnest_level > 0) {
@@ -160,11 +167,15 @@ BindResult SelectBinder::BindUnnest(FunctionExpression &function, idx_t depth, b
 	if (child_type.id() == LogicalTypeId::SQLNULL) {
 		list_unnests = 1;
 	} else {
-		// perform all LIST unnests
+		// perform all LIST/ARRAY unnests
 		auto type = child_type;
 		list_unnests = 0;
-		while (type.id() == LogicalTypeId::LIST) {
-			type = ListType::GetChildType(type);
+		while (type.id() == LogicalTypeId::LIST || type.id() == LogicalTypeId::ARRAY) {
+			if (type.id() == LogicalTypeId::LIST) {
+				type = ListType::GetChildType(type);
+			} else {
+				type = ArrayType::GetChildType(type);
+			}
 			list_unnests++;
 			if (list_unnests >= max_depth) {
 				break;
@@ -185,26 +196,31 @@ BindResult SelectBinder::BindUnnest(FunctionExpression &function, idx_t depth, b
 	for (idx_t current_depth = 0; current_depth < list_unnests; current_depth++) {
 		if (return_type.id() == LogicalTypeId::LIST) {
 			return_type = ListType::GetChildType(return_type);
+		} else if (return_type.id() == LogicalTypeId::ARRAY) {
+			return_type = ArrayType::GetChildType(return_type);
 		}
+
+		if (unnest_expr->GetReturnType().id() == LogicalTypeId::ARRAY) {
+			unnest_expr = BoundCastExpression::AddArrayCastToList(context, std::move(unnest_expr));
+		}
+
 		auto result = make_uniq<BoundUnnestExpression>(return_type);
-		result->child = std::move(unnest_expr);
+		result->ChildMutable() = std::move(unnest_expr);
 		auto alias = function.GetAlias().empty() ? result->ToString() : function.GetAlias();
 
 		auto current_level = unnest_level + list_unnests - current_depth - 1;
 		auto entry = node.unnests.find(current_level);
-		idx_t unnest_table_index;
-		idx_t unnest_column_index;
+		TableIndex unnest_table_index;
+		ProjectionIndex unnest_column_index;
 		if (entry == node.unnests.end()) {
 			BoundUnnestNode unnest_node;
 			unnest_node.index = binder.GenerateTableIndex();
-			unnest_node.expressions.push_back(std::move(result));
 			unnest_table_index = unnest_node.index;
-			unnest_column_index = 0;
+			unnest_column_index = ColumnBinding::PushExpression(unnest_node.expressions, std::move(result));
 			node.unnests.insert(make_pair(current_level, std::move(unnest_node)));
 		} else {
 			unnest_table_index = entry->second.index;
-			unnest_column_index = entry->second.expressions.size();
-			entry->second.expressions.push_back(std::move(result));
+			unnest_column_index = ColumnBinding::PushExpression(entry->second.expressions, std::move(result));
 		}
 		// now create a column reference referring to the unnest
 		unnest_expr = make_uniq<BoundColumnRefExpression>(
@@ -214,23 +230,29 @@ BindResult SelectBinder::BindUnnest(FunctionExpression &function, idx_t depth, b
 	if (struct_unnests > 0) {
 		vector<unique_ptr<Expression>> struct_expressions;
 		struct_expressions.push_back(std::move(unnest_expr));
-
 		for (idx_t i = 0; i < struct_unnests; i++) {
 			vector<unique_ptr<Expression>> new_expressions;
 			// check if there are any structs left
 			bool has_structs = false;
 			for (auto &expr : struct_expressions) {
-				if (expr->return_type.id() == LogicalTypeId::STRUCT) {
+				if (expr->GetReturnType().id() == LogicalTypeId::STRUCT) {
 					// struct! push a struct_extract
-					auto &child_types = StructType::GetChildTypes(expr->return_type);
-					if (StructType::IsUnnamed(expr->return_type)) {
+					auto &child_types = StructType::GetChildTypes(expr->GetReturnType());
+					if (StructType::IsUnnamed(expr->GetReturnType())) {
 						for (idx_t child_index = 0; child_index < child_types.size(); child_index++) {
 							new_expressions.push_back(
 							    CreateBoundStructExtractIndex(context, expr->Copy(), child_index + 1));
 						}
 					} else {
 						for (auto &entry : child_types) {
-							new_expressions.push_back(CreateBoundStructExtract(context, expr->Copy(), entry.first));
+							vector<string> current_key_path;
+							// During recursive expansion, not all expressions are BoundFunctionExpression
+							if (keep_parent_names && expr->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+								current_key_path.push_back(expr->GetAlias());
+							}
+							current_key_path.push_back(entry.first);
+							new_expressions.push_back(
+							    CreateBoundStructExtract(context, expr->Copy(), current_key_path, keep_parent_names));
 						}
 					}
 					has_structs = true;

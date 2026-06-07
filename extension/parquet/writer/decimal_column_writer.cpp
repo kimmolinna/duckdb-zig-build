@@ -1,6 +1,21 @@
 #include "writer/decimal_column_writer.hpp"
 
+#include <stdint.h>
+#include <utility>
+
+#include "duckdb/common/helper.hpp"
+#include "duckdb/common/hugeint.hpp"
+#include "duckdb/common/limits.hpp"
+#include "duckdb/common/operator/comparison_operators.hpp"
+#include "duckdb/common/serializer/write_stream.hpp"
+#include "duckdb/common/types/validity_mask.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "parquet_column_schema.hpp"
+
 namespace duckdb {
+class ColumnWriterPageState;
+class ParquetWriter;
+class Vector;
 
 static void WriteParquetDecimal(hugeint_t input, data_ptr_t result) {
 	bool positive = input >= 0;
@@ -43,7 +58,7 @@ public:
 		return min <= max;
 	}
 
-	void Update(hugeint_t &val) {
+	void Update(const hugeint_t &val) {
 		if (LessThan::Operation(val, min)) {
 			min = val;
 		}
@@ -66,10 +81,9 @@ public:
 	}
 };
 
-FixedDecimalColumnWriter::FixedDecimalColumnWriter(ParquetWriter &writer, idx_t schema_idx,
-                                                   vector<string> schema_path_p, idx_t max_repeat, idx_t max_define,
-                                                   bool can_have_nulls)
-    : PrimitiveColumnWriter(writer, schema_idx, std::move(schema_path_p), max_repeat, max_define, can_have_nulls) {
+FixedDecimalColumnWriter::FixedDecimalColumnWriter(ParquetWriter &writer, ParquetColumnSchema &&column_schema,
+                                                   vector<string> schema_path_p)
+    : PrimitiveColumnWriter(writer, std::move(column_schema), std::move(schema_path_p)) {
 }
 
 unique_ptr<ColumnWriterStatistics> FixedDecimalColumnWriter::InitializeStatsState() {
@@ -79,7 +93,7 @@ unique_ptr<ColumnWriterStatistics> FixedDecimalColumnWriter::InitializeStatsStat
 void FixedDecimalColumnWriter::WriteVector(WriteStream &temp_writer, ColumnWriterStatistics *stats_p,
                                            ColumnWriterPageState *page_state, Vector &input_column, idx_t chunk_start,
                                            idx_t chunk_end) {
-	auto &mask = FlatVector::Validity(input_column);
+	auto &mask = FlatVector::ValidityMutable(input_column);
 	auto *ptr = FlatVector::GetData<hugeint_t>(input_column);
 	auto &stats = stats_p->Cast<FixedDecimalStatistics>();
 

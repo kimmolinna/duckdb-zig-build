@@ -2,9 +2,7 @@
 # description: Test correct behavior if we unexpectedly abort after a checkpoint but before the WAL is successfully truncated
 # group: [storage]
 
-require skip_reload
-
-load __TEST_DIR__/checkpoint_abort.db
+load {TEST_DIR}/checkpoint_abort.db
 
 statement ok
 CREATE TABLE integers AS SELECT * FROM range(100000) tbl(i);
@@ -51,7 +49,10 @@ statement ok
 PRAGMA debug_checkpoint_abort='before_truncate';
 
 statement ok
-UPDATE integers SET i=i;
+UPDATE integers SET i=i+1;
+
+statement ok
+UPDATE integers SET i=i-1;
 
 statement error
 CHECKPOINT;

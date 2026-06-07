@@ -4,6 +4,7 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/execution/reservoir_sample.hpp"
 #include "duckdb/storage/table/persistent_table_data.hpp"
+#include "duckdb/parser/column_list.hpp"
 
 namespace duckdb {
 
@@ -21,6 +22,33 @@ void TableStatistics::Initialize(const vector<LogicalType> &types, PersistentTab
 	if (column_stats.size() != types.size()) { // LCOV_EXCL_START
 		throw IOException("Table statistics column count is not aligned with table column count. Corrupt file?");
 	} // LCOV_EXCL_STOP
+}
+
+void TableStatistics::InitializeEmpty(const TableStatistics &other) {
+	D_ASSERT(Empty());
+	D_ASSERT(!table_sample);
+
+	stats_lock = make_shared_ptr<mutex>();
+	if (other.table_sample) {
+		D_ASSERT(other.table_sample->type == SampleType::RESERVOIR_SAMPLE);
+		auto &res = other.table_sample->Cast<ReservoirSample>();
+		table_sample = res.Copy();
+	} else {
+		table_sample = make_uniq<ReservoirSample>(static_cast<idx_t>(FIXED_SAMPLE_SIZE));
+	}
+
+	for (auto &stats : other.column_stats) {
+		auto new_column_stats = ColumnStatistics::CreateEmptyStats(stats->Statistics().GetType());
+		if (stats->HasDistinctStats()) {
+			new_column_stats->SetDistinct(stats->DistinctStats().Copy());
+		}
+
+		auto &base_stats = new_column_stats->Statistics();
+		if (new_column_stats->HasDistinctStats()) {
+			base_stats.SetDistinctCount(new_column_stats->DistinctStats().GetCount());
+		}
+		column_stats.push_back(new_column_stats);
+	}
 }
 
 void TableStatistics::InitializeEmpty(const vector<LogicalType> &types) {
@@ -101,6 +129,9 @@ void TableStatistics::InitializeAddConstraint(TableStatistics &parent) {
 	for (idx_t i = 0; i < parent.column_stats.size(); i++) {
 		column_stats.push_back(parent.column_stats[i]);
 	}
+	if (parent.table_sample) {
+		table_sample = std::move(parent.table_sample);
+	}
 }
 
 void TableStatistics::MergeStats(TableStatistics &other) {
@@ -113,7 +144,7 @@ void TableStatistics::MergeStats(TableStatistics &other) {
 			D_ASSERT(other.table_sample->type == SampleType::RESERVOIR_SAMPLE);
 			this_reservoir.Merge(std::move(other.table_sample));
 		}
-		// if no other.table sample, do nothig
+		// if no other.table sample, do nothing
 	} else {
 		if (other.table_sample) {
 			auto &other_reservoir = other.table_sample->Cast<ReservoirSample>();
@@ -134,8 +165,8 @@ void TableStatistics::MergeStats(idx_t i, BaseStatistics &stats) {
 	MergeStats(*l, i, stats);
 }
 
-void TableStatistics::MergeStats(TableStatisticsLock &lock, idx_t i, BaseStatistics &stats) {
-	column_stats[i]->Statistics().Merge(stats);
+void TableStatistics::MergeStats(TableStatisticsLock &lock, idx_t i, BaseStatistics &stats, StatsMergeType merge_type) {
+	column_stats[i]->Statistics().Merge(stats, merge_type);
 }
 
 ColumnStatistics &TableStatistics::GetStats(TableStatisticsLock &lock, idx_t i) {
@@ -161,11 +192,23 @@ void TableStatistics::DestroyTableSample(TableStatisticsLock &lock) const {
 	}
 }
 
-unique_ptr<BaseStatistics> TableStatistics::CopyStats(idx_t i) {
+void TableStatistics::SetStats(TableStatistics &other) {
+	TableStatisticsLock lock(*stats_lock);
+	column_stats = std::move(other.column_stats);
+	table_sample = std::move(other.table_sample);
+}
+
+unique_ptr<BaseStatistics> TableStatistics::CopyStats(const StorageIndex &index) {
 	lock_guard<mutex> l(*stats_lock);
-	auto result = column_stats[i]->Statistics().Copy();
-	if (column_stats[i]->HasDistinctStats()) {
-		result.SetDistinctCount(column_stats[i]->DistinctStats().GetCount());
+
+	auto column_index = index.GetPrimaryIndex();
+	auto &stats = *column_stats[column_index];
+	auto result = stats.Statistics().Copy();
+	if (stats.HasDistinctStats()) {
+		result.SetDistinctCount(stats.DistinctStats().GetCount());
+	}
+	if (index.IsPushdownExtract()) {
+		return result.PushdownExtract(index.GetChildIndexes()[0]);
 	}
 	return result.ToUnique();
 }
@@ -237,7 +280,7 @@ unique_ptr<TableStatisticsLock> TableStatistics::GetLock() {
 	return make_uniq<TableStatisticsLock>(*stats_lock);
 }
 
-bool TableStatistics::Empty() {
+bool TableStatistics::Empty() const {
 	D_ASSERT(column_stats.empty() == (stats_lock.get() == nullptr));
 	return column_stats.empty();
 }

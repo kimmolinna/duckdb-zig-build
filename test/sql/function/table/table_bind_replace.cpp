@@ -8,7 +8,6 @@
 #include "duckdb/parser/expression/function_expression.hpp"
 
 using namespace duckdb;
-using namespace std;
 
 // This function demonstrates/tests how the TableFunction::bind_replace works.
 // The bind_replace_demo function has two params: depth and name. It generates custom plan recursively by using
@@ -80,12 +79,12 @@ struct BindReplaceDemoFun {
 		auto &state = (BindReplaceDemoFun::CustomFunctionData &)*data.bind_data;
 
 		if (!state.done) {
-			output.SetValue(0, 0, Value(state.current_depth));
-			output.SetValue(1, 0, Value(state.current_name));
-			output.SetCardinality(1);
+			output.data[0].Append(Value(state.current_depth));
+			output.data[1].Append(Value(state.current_name));
+			output.SetChildCardinality(1);
 			state.done = true;
 		} else {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 		}
 	}
 

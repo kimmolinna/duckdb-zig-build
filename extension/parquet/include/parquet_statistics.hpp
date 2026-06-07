@@ -8,14 +8,37 @@
 
 #pragma once
 
+#include <stdint.h>
+#include <string>
+
 #include "duckdb.hpp"
-#ifndef DUCKDB_AMALGAMATION
 #include "duckdb/storage/statistics/base_statistics.hpp"
-#endif
 #include "parquet_types.h"
 #include "resizable_buffer.hpp"
+#include "duckdb/common/assert.hpp"
+#include "duckdb/common/typedefs.hpp"
+#include "duckdb/common/types/value.hpp"
+#include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/vector.hpp"
+
+namespace duckdb_apache {
+namespace thrift {
+namespace protocol {
+class TProtocol;
+} // namespace protocol
+} // namespace thrift
+} // namespace duckdb_apache
+namespace duckdb_parquet {
+class ColumnChunk;
+class ColumnMetaData;
+class SchemaElement;
+class Statistics;
+} // namespace duckdb_parquet
 
 namespace duckdb {
+class Allocator;
+class TableFilter;
+enum class LogicalTypeId : uint8_t;
 
 using duckdb_parquet::ColumnChunk;
 using duckdb_parquet::SchemaElement;
@@ -25,9 +48,13 @@ struct ParquetColumnSchema;
 class ResizeableBuffer;
 
 struct ParquetStatisticsUtils {
-
 	static unique_ptr<BaseStatistics> TransformColumnStatistics(const ParquetColumnSchema &reader,
-	                                                            const vector<ColumnChunk> &columns);
+	                                                            const vector<ColumnChunk> &columns, bool can_have_nan);
+
+	static unique_ptr<BaseStatistics>
+	TransformParquetStatistics(const LogicalType &type, const ParquetColumnSchema &schema,
+	                           const duckdb_parquet::Statistics &parquet_stats, bool can_have_nan,
+	                           optional_ptr<const ColumnChunk> column_chunk = nullptr);
 
 	static Value ConvertValue(const LogicalType &type, const ParquetColumnSchema &schema_ele, const std::string &stats);
 
@@ -35,6 +62,9 @@ struct ParquetStatisticsUtils {
 
 	static bool BloomFilterExcludes(const TableFilter &filter, const duckdb_parquet::ColumnMetaData &column_meta_data,
 	                                duckdb_apache::thrift::protocol::TProtocol &file_proto, Allocator &allocator);
+
+	static unique_ptr<BaseStatistics> CreateNumericStats(const LogicalType &type, const ParquetColumnSchema &schema_ele,
+	                                                     const duckdb_parquet::Statistics &parquet_stats);
 
 private:
 	static Value ConvertValueInternal(const LogicalType &type, const ParquetColumnSchema &schema_ele,

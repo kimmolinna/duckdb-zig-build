@@ -1,3 +1,4 @@
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/execution/operator/persistent/physical_update.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
@@ -6,24 +7,26 @@
 
 namespace duckdb {
 
-unique_ptr<PhysicalOperator> DuckCatalog::PlanUpdate(ClientContext &context, LogicalUpdate &op,
-                                                     unique_ptr<PhysicalOperator> plan) {
-	auto update = make_uniq<PhysicalUpdate>(op.types, op.table, op.table.GetStorage(), op.columns,
-	                                        std::move(op.expressions), std::move(op.bound_defaults),
-	                                        std::move(op.bound_constraints), op.estimated_cardinality, op.return_chunk);
-
-	update->update_is_del_and_insert = op.update_is_del_and_insert;
-	update->children.push_back(std::move(plan));
-	return std::move(update);
+PhysicalOperator &DuckCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
+                                          PhysicalOperator &plan) {
+	auto &update = planner.Make<PhysicalUpdate>(
+	    op.types, op.table.Cast<DuckTableEntry>(), op.table.GetStorage(), op.columns, std::move(op.expressions),
+	    std::move(op.bound_defaults), std::move(op.bound_constraints), op.estimated_cardinality, op.return_chunk);
+	auto &cast_update = update.Cast<PhysicalUpdate>();
+	cast_update.update_is_del_and_insert = op.update_is_del_and_insert;
+	cast_update.children.push_back(plan);
+	return update;
 }
 
-unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalUpdate &op) {
+PhysicalOperator &Catalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op) {
+	auto &plan = planner.CreatePlan(*op.children[0]);
+	return PlanUpdate(context, planner, op, plan);
+}
+
+PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalUpdate &op) {
 	D_ASSERT(op.children.size() == 1);
-
-	auto plan = CreatePlan(*op.children[0]);
-
 	dependencies.AddDependency(op.table);
-	return op.table.catalog.PlanUpdate(context, op, std::move(plan));
+	return op.table.catalog.PlanUpdate(context, *this, op);
 }
 
 } // namespace duckdb

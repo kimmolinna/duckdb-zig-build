@@ -14,9 +14,8 @@ void BatchedBufferedData::BlockSink(const InterruptState &blocked_sink, idx_t ba
 	blocked_sinks.emplace(batch, blocked_sink);
 }
 
-BatchedBufferedData::BatchedBufferedData(weak_ptr<ClientContext> context)
-    : BufferedData(BufferedData::Type::BATCHED, std::move(context)), buffer_byte_count(0), read_queue_byte_count(0),
-      min_batch(0) {
+BatchedBufferedData::BatchedBufferedData(ClientContext &context)
+    : BufferedData(BufferedData::Type::BATCHED, context), buffer_byte_count(0), read_queue_byte_count(0), min_batch(0) {
 	read_queue_capacity = (idx_t)(static_cast<double>(total_buffer_size) * 0.6);
 	buffer_capacity = (idx_t)(static_cast<double>(total_buffer_size) * 0.4);
 }
@@ -87,7 +86,7 @@ void BatchedBufferedData::MoveCompletedBatches(lock_guard<mutex> &lock) {
 		idx_t batch_allocation_size = 0;
 		for (auto it = chunks.begin(); it != chunks.end(); it++) {
 			auto chunk = std::move(*it);
-			auto allocation_size = chunk->GetAllocationSize();
+			auto allocation_size = chunk->GetDataSize();
 			batch_allocation_size += allocation_size;
 			read_queue.push_back(std::move(chunk));
 		}
@@ -181,7 +180,7 @@ unique_ptr<DataChunk> BatchedBufferedData::Scan() {
 	if (!read_queue.empty()) {
 		chunk = std::move(read_queue.front());
 		read_queue.pop_front();
-		auto allocation_size = chunk->GetAllocationSize();
+		auto allocation_size = chunk->GetDataSize();
 		read_queue_byte_count -= allocation_size;
 	} else {
 		context.reset();
@@ -198,7 +197,7 @@ void BatchedBufferedData::Append(const DataChunk &to_append, idx_t batch) {
 	auto chunk = make_uniq<DataChunk>();
 	chunk->Initialize(Allocator::DefaultAllocator(), to_append.GetTypes());
 	to_append.Copy(*chunk, 0);
-	auto allocation_size = chunk->GetAllocationSize();
+	auto allocation_size = chunk->GetDataSize();
 
 	lock_guard<mutex> lock(glock);
 	D_ASSERT(batch >= min_batch);

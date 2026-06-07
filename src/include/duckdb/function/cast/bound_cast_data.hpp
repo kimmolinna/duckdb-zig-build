@@ -113,27 +113,32 @@ public:
 	unique_ptr<FunctionLocalState> value_state;
 };
 
-struct UnionBoundCastData : public BoundCastData {
-	UnionBoundCastData(union_tag_t member_idx, string name, LogicalType type, int64_t cost,
-	                   BoundCastInfo member_cast_info)
-	    : tag(member_idx), name(std::move(name)), type(std::move(type)), cost(cost),
-	      member_cast_info(std::move(member_cast_info)) {
+struct StructToMapBoundCastData : public BoundCastData {
+	StructToMapBoundCastData(BoundCastInfo key_cast, vector<BoundCastInfo> value_casts)
+	    : key_cast(std::move(key_cast)), value_casts(std::move(value_casts)) {
 	}
 
-	union_tag_t tag;
-	string name;
-	LogicalType type;
-	int64_t cost;
-	BoundCastInfo member_cast_info;
+	BoundCastInfo key_cast;
+	vector<BoundCastInfo> value_casts;
+
+	static unique_ptr<BoundCastData> BindStructToMapCast(BindCastInput &input, const LogicalType &source,
+	                                                     const LogicalType &target);
+	static unique_ptr<FunctionLocalState> InitStructToMapCastLocalState(CastLocalStateParameters &parameters);
 
 public:
 	unique_ptr<BoundCastData> Copy() const override {
-		return make_uniq<UnionBoundCastData>(tag, name, type, cost, member_cast_info.Copy());
+		vector<BoundCastInfo> copy_value_casts;
+		for (auto &value_cast : value_casts) {
+			copy_value_casts.push_back(value_cast.Copy());
+		}
+		return make_uniq<StructToMapBoundCastData>(key_cast.Copy(), std::move(copy_value_casts));
 	}
+};
 
-	static bool SortByCostAscending(const UnionBoundCastData &left, const UnionBoundCastData &right) {
-		return left.cost < right.cost;
-	}
+struct StructToMapCastLocalState : public FunctionLocalState {
+public:
+	unique_ptr<FunctionLocalState> key_state;
+	vector<unique_ptr<FunctionLocalState>> value_states;
 };
 
 struct StructToUnionCast {

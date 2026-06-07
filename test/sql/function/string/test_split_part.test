@@ -2,9 +2,6 @@
 # description: split part test
 # group: [string]
 
-statement ok
-PRAGMA enable_verification
-
 # test core functionality
 query T
 select split_part('a,b,c',',',1)
@@ -94,11 +91,14 @@ NULL
 statement error
 select split_part()
 ----
+<REGEX>:.*Binder Error.*does not support the supplied arguments.*
 
 statement error
 select split_part('a')
 ----
+<REGEX>:.*Binder Error.*does not support the supplied arguments.*
 
 statement error
 select split_part('a','a')
 ----
+<REGEX>:.*Binder Error.*does not support the supplied arguments.*

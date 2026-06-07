@@ -1,5 +1,8 @@
 #include "duckdb/execution/operator/helper/physical_load.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/client_data.hpp"
+#include "duckdb/catalog/catalog_search_path.hpp"
+#include "duckdb/main/settings.hpp"
 
 namespace duckdb {
 
@@ -25,7 +28,8 @@ static void InstallFromRepository(ClientContext &context, const LoadInfo &info) 
 	ExtensionHelper::InstallExtension(context, info.filename, options);
 }
 
-SourceResultType PhysicalLoad::GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const {
+SourceResultType PhysicalLoad::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                               OperatorSourceInput &input) const {
 	if (info->load_type == LoadType::INSTALL || info->load_type == LoadType::FORCE_INSTALL) {
 		if (info->repository.empty()) {
 			ExtensionInstallOptions options;
@@ -38,7 +42,12 @@ SourceResultType PhysicalLoad::GetData(ExecutionContext &context, DataChunk &chu
 		}
 
 	} else {
-		ExtensionHelper::LoadExternalExtension(context.client, info->filename);
+		ExtensionLoadOptions options;
+		options.extension_name = info->filename;
+		options.alias = info->alias;
+		ExtensionHelper::LoadExternalExtension(context.client, options);
+		// adds an explicitly set extension schema to the search path
+		ExtensionLoader::RefreshSearchPath(context.client);
 	}
 
 	return SourceResultType::FINISHED;

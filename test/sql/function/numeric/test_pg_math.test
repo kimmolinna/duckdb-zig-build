@@ -5,7 +5,7 @@
 # see https://www.postgresql.org/docs/10/functions-math.html
 
 statement ok
-PRAGMA enable_verification
+SET ieee_floating_point_ops = false;
 
 query R
 select abs(-17.4)
@@ -105,22 +105,27 @@ select log(2, 64)
 statement error
 select log(0, 64)
 ----
+<REGEX>:.*Out of Range Error.*cannot take logarithm.*
 
 statement error
 select log(2, 0)
 ----
+<REGEX>:.*Out of Range Error.*cannot take logarithm.*
 
 statement error
 select log(-1, 64)
 ----
+<REGEX>:.*Out of Range Error.*cannot take logarithm.*
 
 statement error
 select log(2, -1)
 ----
+<REGEX>:.*Out of Range Error.*cannot take logarithm.*
 
 statement error
 select log(1, 64)
 ----
+<REGEX>:.*Out of Range Error.*division by zero.*
 
 query I
 select log(2, 1)
@@ -161,11 +166,17 @@ NaN
 statement error
 select log('-Inf'::DOUBLE, 64)
 ----
+<REGEX>:.*Out of Range Error.*cannot take logarithm.*
 
 statement error
 select log(64, '-Inf'::DOUBLE)
 ----
+<REGEX>:.*Out of Range Error.*cannot take logarithm.*
 
 statement error
 select log(2, -1)
 ----
+<REGEX>:.*Out of Range Error.*cannot take logarithm.*
+
+statement ok
+RESET ieee_floating_point_ops;

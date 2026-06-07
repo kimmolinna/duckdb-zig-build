@@ -58,7 +58,7 @@ struct CastParameters {
 	}
 	CastParameters(bool strict, string *error_message) : CastParameters(nullptr, strict, error_message, nullptr) {
 	}
-	CastParameters(BoundCastData *cast_data, bool strict, string *error_message,
+	CastParameters(optional_ptr<BoundCastData> cast_data, bool strict, string *error_message,
 	               optional_ptr<FunctionLocalState> local_state, bool nullify_parent_p = false)
 	    : cast_data(cast_data), strict(strict), error_message(error_message), local_state(local_state),
 	      nullify_parent(nullify_parent_p) {
@@ -75,6 +75,10 @@ struct CastParameters {
 	bool strict = false;
 	// out: error message in case cast has failed
 	string *error_message = nullptr;
+	//! Source expression
+	optional_ptr<const Expression> cast_source;
+	//! Target expression
+	optional_ptr<const Expression> cast_target;
 	//! Local state
 	optional_ptr<FunctionLocalState> local_state;
 	//! Query location (if any)
@@ -107,12 +111,36 @@ struct BoundCastInfo {
 	BoundCastInfo( // NOLINT: allow explicit cast from cast_function_t
 	    cast_function_t function, unique_ptr<BoundCastData> cast_data = nullptr,
 	    init_cast_local_state_t init_local_state = nullptr);
-	cast_function_t function;
-	init_cast_local_state_t init_local_state;
-	unique_ptr<BoundCastData> cast_data;
+
+	bool Cast(Vector &source, Vector &result, idx_t count, CastParameters &parameters) const {
+		auto all_ok = function(source, result, count, parameters);
+		FlatVector::SetSize(result, count);
+		return all_ok;
+	}
 
 public:
 	BoundCastInfo Copy() const;
+	optional_ptr<BoundCastData> GetCastData() const {
+		return cast_data;
+	}
+	bool HasInitLocalState() const {
+		return init_local_state;
+	}
+	unique_ptr<FunctionLocalState> InitLocalState(CastLocalStateParameters &parameters) const {
+		return init_local_state(parameters);
+	}
+	bool HasFunction() const {
+		return function;
+	}
+	bool IsNopCast() const;
+	void SetFunction(cast_function_t new_function) {
+		function = new_function;
+	}
+
+private:
+	cast_function_t function;
+	init_cast_local_state_t init_local_state;
+	unique_ptr<BoundCastData> cast_data;
 };
 
 struct BindCastInput {
@@ -151,11 +179,14 @@ private:
 	static BoundCastInfo StringCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
 	static BoundCastInfo StructCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
 	static BoundCastInfo TimeCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
+	static BoundCastInfo TimeNsCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
 	static BoundCastInfo TimeTzCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
 	static BoundCastInfo TimestampCastSwitch(BindCastInput &input, const LogicalType &source,
 	                                         const LogicalType &target);
 	static BoundCastInfo TimestampTzCastSwitch(BindCastInput &input, const LogicalType &source,
 	                                           const LogicalType &target);
+	static BoundCastInfo TimestampTzNsCastSwitch(BindCastInput &input, const LogicalType &source,
+	                                             const LogicalType &target);
 	static BoundCastInfo TimestampNsCastSwitch(BindCastInput &input, const LogicalType &source,
 	                                           const LogicalType &target);
 	static BoundCastInfo TimestampMsCastSwitch(BindCastInput &input, const LogicalType &source,
@@ -163,10 +194,15 @@ private:
 	static BoundCastInfo TimestampSecCastSwitch(BindCastInput &input, const LogicalType &source,
 	                                            const LogicalType &target);
 	static BoundCastInfo UnionCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
+	static BoundCastInfo VariantCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
 	static BoundCastInfo UUIDCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
-	static BoundCastInfo VarintCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
+	static BoundCastInfo GeoCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
+	static BoundCastInfo TypeCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
+	static BoundCastInfo BignumCastSwitch(BindCastInput &input, const LogicalType &source, const LogicalType &target);
 	static BoundCastInfo ImplicitToUnionCast(BindCastInput &input, const LogicalType &source,
 	                                         const LogicalType &target);
+	static BoundCastInfo ImplicitToVariantCast(BindCastInput &input, const LogicalType &source,
+	                                           const LogicalType &target);
 };
 
 } // namespace duckdb

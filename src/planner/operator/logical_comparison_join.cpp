@@ -1,7 +1,7 @@
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/common/enum_util.hpp"
+
 namespace duckdb {
 
 LogicalComparisonJoin::LogicalComparisonJoin(JoinType join_type, LogicalOperatorType logical_type)
@@ -18,9 +18,13 @@ InsertionOrderPreservingMap<string> LogicalComparisonJoin::ParamsToString() cons
 			conditions_info += "\n";
 		}
 		auto &condition = conditions[i];
-		auto expr =
-		    make_uniq<BoundComparisonExpression>(condition.comparison, condition.left->Copy(), condition.right->Copy());
-		conditions_info += expr->ToString();
+		if (condition.IsComparison()) {
+			auto expr = BoundComparisonExpression::Create(condition.GetComparisonType(), condition.GetLHS().Copy(),
+			                                              condition.GetRHS().Copy());
+			conditions_info += expr->ToString();
+		} else {
+			conditions_info += condition.GetJoinExpression().ToString();
+		}
 	}
 	result["Conditions"] = conditions_info;
 	SetParamsEstimatedCardinality(result);
@@ -29,23 +33,37 @@ InsertionOrderPreservingMap<string> LogicalComparisonJoin::ParamsToString() cons
 }
 
 bool LogicalComparisonJoin::HasEquality(idx_t &range_count) const {
+	bool result = false;
 	for (size_t c = 0; c < conditions.size(); ++c) {
 		auto &cond = conditions[c];
-		switch (cond.comparison) {
-		case ExpressionType::COMPARE_EQUAL:
-		case ExpressionType::COMPARE_NOT_DISTINCT_FROM:
+		if (cond.IsComparison()) {
+			switch (cond.GetComparisonType()) {
+			case ExpressionType::COMPARE_EQUAL:
+			case ExpressionType::COMPARE_NOT_DISTINCT_FROM:
+				result = true;
+				break;
+			case ExpressionType::COMPARE_LESSTHAN:
+			case ExpressionType::COMPARE_GREATERTHAN:
+			case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+			case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+				++range_count;
+				break;
+			case ExpressionType::COMPARE_NOTEQUAL:
+			case ExpressionType::COMPARE_DISTINCT_FROM:
+				break;
+			default:
+				throw NotImplementedException("Unimplemented comparison join");
+			}
+		}
+	}
+	return result;
+}
+
+bool LogicalComparisonJoin::HasArbitraryConditions() const {
+	for (size_t c = 0; c < conditions.size(); ++c) {
+		auto &cond = conditions[c];
+		if (!cond.IsComparison()) {
 			return true;
-		case ExpressionType::COMPARE_LESSTHAN:
-		case ExpressionType::COMPARE_GREATERTHAN:
-		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			++range_count;
-			break;
-		case ExpressionType::COMPARE_NOTEQUAL:
-		case ExpressionType::COMPARE_DISTINCT_FROM:
-			break;
-		default:
-			throw NotImplementedException("Unimplemented comparison join");
 		}
 	}
 	return false;

@@ -9,8 +9,11 @@
 #include "duckdb/parser/parsed_data/create_pragma_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_window_function_info.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/config.hpp"
+
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 
 namespace duckdb {
 
@@ -96,34 +99,35 @@ struct ExtensionFunctionInfo : public ScalarFunctionInfo {
 	string extension;
 };
 
-unique_ptr<FunctionData> BindExtensionFunction(ClientContext &context, ScalarFunction &bound_function,
-                                               vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<Expression> BindExtensionFunction(FunctionBindExpressionInput &input) {
+	auto &context = input.context;
+	auto &arguments = input.children;
+	auto &bound_function = input.bound_function;
+
 	// if this is triggered we are trying to call a method that is present in an extension
 	// but the extension is not loaded
 	// try to autoload the extension
 	// first figure out which extension we need to auto-load
-	auto &function_info = bound_function.function_info->Cast<ExtensionFunctionInfo>();
+	auto &function_info = bound_function.GetExtraFunctionInfo().Cast<ExtensionFunctionInfo>();
 	auto &extension_name = function_info.extension;
 	auto &db = *context.db;
 
 	if (!ExtensionHelper::CanAutoloadExtension(extension_name)) {
 		throw BinderException("Trying to call function \"%s\" which is present in extension \"%s\" - but the extension "
 		                      "is not loaded and could not be auto-loaded",
-		                      bound_function.name, extension_name);
+		                      bound_function.GetName(), extension_name);
 	}
 	// auto-load the extension
 	ExtensionHelper::AutoLoadExtension(db, extension_name);
 
 	// now find the function in the catalog
 	auto &catalog = Catalog::GetSystemCatalog(db);
-	auto &function_entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(context, DEFAULT_SCHEMA, bound_function.name);
+	auto &function_entry =
+	    catalog.GetEntry<ScalarFunctionCatalogEntry>(context, DEFAULT_SCHEMA, bound_function.GetName());
+
 	// override the function with the extension function
-	bound_function = function_entry.functions.GetFunctionByArguments(context, bound_function.arguments);
-	// call the original bind (if any)
-	if (!bound_function.bind) {
-		return nullptr;
-	}
-	return bound_function.bind(context, bound_function, arguments);
+	const auto &func = function_entry.functions.GetFunctionByArguments(context, bound_function.GetArguments());
+	return func.Bind(context, std::move(arguments));
 }
 
 void BuiltinFunctions::AddExtensionFunction(ScalarFunctionSet set) {
@@ -142,9 +146,9 @@ void BuiltinFunctions::RegisterExtensionOverloads() {
 		vector<LogicalType> arguments;
 		auto splits = StringUtil::Split(entry.signature, ">");
 		auto return_type = DBConfig::ParseLogicalType(splits[1]);
-		auto argument_splits = StringUtil::Split(splits[0], ",");
-		for (auto &param : argument_splits) {
-			arguments.push_back(DBConfig::ParseLogicalType(param));
+		auto parameters = Value(splits[0]).DefaultCastAs(LogicalType::LIST(LogicalType::VARCHAR));
+		for (auto &param : ListValue::GetChildren(parameters)) {
+			arguments.push_back(DBConfig::ParseLogicalType(param.GetValue<string>()));
 		}
 		if (entry.type != CatalogType::SCALAR_FUNCTION_ENTRY) {
 			throw InternalException(
@@ -152,9 +156,10 @@ void BuiltinFunctions::RegisterExtensionOverloads() {
 			    entry.name);
 		}
 
-		ScalarFunction function(entry.name, std::move(arguments), std::move(return_type), nullptr,
-		                        BindExtensionFunction);
-		function.function_info = make_shared_ptr<ExtensionFunctionInfo>(entry.extension);
+		ScalarFunction function(entry.name, std::move(arguments), std::move(return_type), nullptr);
+		function.SetBindExpressionCallback(BindExtensionFunction);
+
+		function.SetExtraFunctionInfo<ExtensionFunctionInfo>(entry.extension);
 		if (current_set.name != entry.name) {
 			if (!current_set.name.empty()) {
 				// create set of functions

@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
-#include "duckdb/planner/filter/conjunction_filter.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
@@ -20,24 +20,30 @@ struct DistinctCount {
 };
 
 struct ExpressionBinding {
-	bool found_expression = false;
+public:
+	bool FoundExpression() const;
+	bool FoundColumnRef() const;
+
+public:
+	optional_ptr<Expression> expression;
 	ColumnBinding child_binding;
 	bool expression_is_constant = false;
 };
 
 struct RelationStats {
-	// column_id -> estimated distinct count for column
+public:
+	RelationStats();
+
+public:
+	//! column_id -> estimated distinct count for column
 	vector<DistinctCount> column_distinct_count;
 	idx_t cardinality;
 	double filter_strength = 1;
 	bool stats_initialized = false;
 
-	// for debug, column names and tables
+	//! for debug, column names and tables
 	vector<string> column_names;
 	string table_name;
-
-	RelationStats() : cardinality(1), filter_strength(1), stats_initialized(false) {
-	}
 };
 
 class RelationStatisticsHelper {
@@ -45,10 +51,7 @@ public:
 	static constexpr double DEFAULT_SELECTIVITY = 0.2;
 
 public:
-	static idx_t InspectTableFilter(idx_t cardinality, idx_t column_index, TableFilter &filter,
-	                                BaseStatistics &base_stats);
-	//	static idx_t InspectConjunctionOR(idx_t cardinality, idx_t column_index, ConjunctionOrFilter &filter,
-	//	                                  BaseStatistics &base_stats);
+	static idx_t InspectTableFilter(idx_t cardinality, const TableFilter &filter, BaseStatistics &base_stats);
 	//! Extract Statistics from a LogicalGet.
 	static RelationStats ExtractGetStats(LogicalGet &get, ClientContext &context);
 	static RelationStats ExtractDelimGetStats(LogicalDelimGet &delim_get, ClientContext &context);
@@ -65,10 +68,12 @@ public:
 	static RelationStats CombineStatsOfReorderableOperator(vector<ColumnBinding> &bindings,
 	                                                       vector<RelationStats> relation_stats);
 	//! Called after reordering a query plan with potentially 2+ relations.
-	static RelationStats CombineStatsOfNonReorderableOperator(LogicalOperator &op, vector<RelationStats> child_stats);
+	static RelationStats CombineStatsOfNonReorderableOperator(LogicalOperator &op,
+	                                                          const vector<RelationStats> &child_stats);
 	static void CopyRelationStats(RelationStats &to, const RelationStats &from);
 
 private:
+	static idx_t GetDistinctCount(LogicalGet &get, ClientContext &context, const ColumnIndex &column_id);
 };
 
 } // namespace duckdb

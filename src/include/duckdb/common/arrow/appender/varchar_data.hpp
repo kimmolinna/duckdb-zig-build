@@ -1,3 +1,11 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// duckdb/common/arrow/appender/varchar_data.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
 #pragma once
 
 #include "duckdb/common/arrow/appender/append_data.hpp"
@@ -42,16 +50,17 @@ struct ArrowVarcharData {
 	}
 
 	template <bool LARGE_STRING>
-	static void AppendTemplated(ArrowAppendData &append_data, Vector &input, idx_t from, idx_t to, idx_t input_size) {
+	static void AppendTemplated(ArrowAppendData &append_data, const Vector &input, idx_t from, idx_t to,
+	                            idx_t input_size) {
 		idx_t size = to - from;
 		UnifiedVectorFormat format;
-		input.ToUnifiedFormat(input_size, format);
+		input.ToUnifiedFormat(format);
 		auto &main_buffer = append_data.GetMainBuffer();
 		auto &validity_buffer = append_data.GetValidityBuffer();
 		auto &aux_buffer = append_data.GetAuxBuffer();
 
 		// resize the validity mask and set up the validity buffer for iteration
-		ResizeValidity(validity_buffer, append_data.row_count + size);
+		ArrowAppendData::ResizeValidity(validity_buffer, append_data.row_count + size);
 		auto validity_data = (uint8_t *)validity_buffer.data();
 
 		// resize the offset buffer - the offset buffer holds the offsets into the child array
@@ -72,8 +81,8 @@ struct ArrowVarcharData {
 			if (!format.validity.RowIsValid(source_idx)) {
 				uint8_t current_bit;
 				idx_t current_byte;
-				GetBitPosition(append_data.row_count + i - from, current_byte, current_bit);
-				SetNull(append_data, validity_data, current_byte, current_bit);
+				ArrowAppendData::GetBitPosition(append_data.row_count + i - from, current_byte, current_bit);
+				append_data.SetNull(validity_data, current_byte, current_bit);
 				offset_data[offset_idx] = last_offset;
 				continue;
 			}
@@ -102,7 +111,7 @@ struct ArrowVarcharData {
 		append_data.row_count += size;
 	}
 
-	static void Append(ArrowAppendData &append_data, Vector &input, idx_t from, idx_t to, idx_t input_size) {
+	static void Append(ArrowAppendData &append_data, const Vector &input, idx_t from, idx_t to, idx_t input_size) {
 		if (append_data.options.arrow_offset_size == ArrowOffsetSize::REGULAR) {
 			// Check if the offset exceeds the max supported value
 			AppendTemplated<false>(append_data, input, from, to, input_size);
@@ -125,15 +134,15 @@ struct ArrowVarcharToStringViewData {
 		result.GetBufferSizeBuffer().reserve(sizeof(int64_t));
 	}
 
-	static void Append(ArrowAppendData &append_data, Vector &input, idx_t from, idx_t to, idx_t input_size) {
+	static void Append(ArrowAppendData &append_data, const Vector &input, idx_t from, idx_t to, idx_t input_size) {
 		idx_t size = to - from;
 		UnifiedVectorFormat format;
-		input.ToUnifiedFormat(input_size, format);
+		input.ToUnifiedFormat(format);
 		auto &main_buffer = append_data.GetMainBuffer();
 		auto &validity_buffer = append_data.GetValidityBuffer();
 		auto &aux_buffer = append_data.GetAuxBuffer();
 		// resize the validity mask and set up the validity buffer for iteration
-		ResizeValidity(validity_buffer, append_data.row_count + size);
+		ArrowAppendData::ResizeValidity(validity_buffer, append_data.row_count + size);
 		auto validity_data = (uint8_t *)validity_buffer.data();
 
 		main_buffer.resize(main_buffer.size() + sizeof(arrow_string_view_t) * (size));
@@ -147,8 +156,8 @@ struct ArrowVarcharToStringViewData {
 				// Null value
 				uint8_t current_bit;
 				idx_t current_byte;
-				GetBitPosition(result_idx, current_byte, current_bit);
-				SetNull(append_data, validity_data, current_byte, current_bit);
+				ArrowAppendData::GetBitPosition(result_idx, current_byte, current_bit);
+				append_data.SetNull(validity_data, current_byte, current_bit);
 				// We have to set these bytes to 0, for some reason
 				arrow_data[result_idx] = arrow_string_view_t(0, "");
 				continue;

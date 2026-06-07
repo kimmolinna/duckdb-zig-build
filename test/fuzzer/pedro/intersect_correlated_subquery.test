@@ -3,13 +3,14 @@
 # group: [pedro]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE t0 (c1 TINYINT);
 
 query I
 SELECT (SELECT 1 INTERSECT SELECT 1 HAVING true) FROM t0;
+----
+
+query I
+SELECT (SELECT 1 INTERSECT SELECT 1 HAVING false) FROM t0;
 ----
 
 query I

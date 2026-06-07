@@ -7,15 +7,25 @@
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_empty_result.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 
 namespace duckdb {
 
 using Filter = FilterPushdown::Filter;
 
-void FilterPushdown::CheckMarkToSemi(LogicalOperator &op, unordered_set<idx_t> &table_bindings) {
+void FilterPushdown::CheckMarkToSemi(LogicalOperator &op, unordered_set<TableIndex> &table_bindings) {
 	switch (op.type) {
-	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+	case LogicalOperatorType::LOGICAL_DELIM_JOIN: {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		if (join.join_type == JoinType::MARK) {
+			// Duplicate-eliminated correlated subqueries must keep MARK semantics; converting to SEMI can drop
+			// correlation for nested RHS shapes (issue #22267).
+			join.convert_mark_to_semi = false;
+		}
+		break;
+	}
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
 		auto &join = op.Cast<LogicalComparisonJoin>();
 		if (join.join_type != JoinType::MARK) {
@@ -36,14 +46,14 @@ void FilterPushdown::CheckMarkToSemi(LogicalOperator &op, unordered_set<idx_t> &
 		// the tables in the projection
 		auto &proj = op.Cast<LogicalProjection>();
 		auto proj_bindings = proj.GetColumnBindings();
-		unordered_set<idx_t> new_table_bindings;
+		unordered_set<TableIndex> new_table_bindings;
 		for (auto &binding : proj_bindings) {
 			auto col_index = binding.column_index;
 			auto &expr = proj.expressions.at(col_index);
 			ExpressionIterator::EnumerateExpression(expr, [&](Expression &child) {
 				if (child.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 					auto &col_ref = child.Cast<BoundColumnRefExpression>();
-					new_table_bindings.insert(col_ref.binding.table_index);
+					new_table_bindings.insert(col_ref.Binding().table_index);
 				}
 			});
 			table_bindings = new_table_bindings;
@@ -61,7 +71,7 @@ void FilterPushdown::CheckMarkToSemi(LogicalOperator &op, unordered_set<idx_t> &
 			ExpressionIterator::EnumerateExpression(expr, [&](Expression &child) {
 				if (child.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 					auto &col_ref = child.Cast<BoundColumnRefExpression>();
-					bindings_to_keep.push_back(col_ref.binding);
+					bindings_to_keep.push_back(col_ref.Binding());
 				}
 			});
 		}
@@ -69,11 +79,11 @@ void FilterPushdown::CheckMarkToSemi(LogicalOperator &op, unordered_set<idx_t> &
 			ExpressionIterator::EnumerateExpression(expr, [&](Expression &child) {
 				if (child.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 					auto &col_ref = child.Cast<BoundColumnRefExpression>();
-					bindings_to_keep.push_back(col_ref.binding);
+					bindings_to_keep.push_back(col_ref.Binding());
 				}
 			});
 		}
-		table_bindings = unordered_set<idx_t>();
+		table_bindings = unordered_set<TableIndex>();
 		for (auto &expr_binding : bindings_to_keep) {
 			table_bindings.insert(expr_binding.table_index);
 		}
@@ -149,47 +159,81 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownJoin(unique_ptr<LogicalOpera
 	         op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
 	         op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN);
 	auto &join = op->Cast<LogicalJoin>();
-	if (join.HasProjectionMap()) {
-		// cannot push down further otherwise the projection maps won't be preserved
-		return FinishPushdown(std::move(op));
-	}
 
-	unordered_set<idx_t> left_bindings, right_bindings;
+	const auto restore_projection_maps = join.HasProjectionMap();
+	auto left_projection_map = join.left_projection_map;
+	auto right_projection_map = join.right_projection_map;
+
+	unordered_set<TableIndex> left_bindings, right_bindings;
 	LogicalJoin::GetTableReferences(*op->children[0], left_bindings);
 	LogicalJoin::GetTableReferences(*op->children[1], right_bindings);
 
+	unique_ptr<LogicalOperator> result;
 	switch (join.join_type) {
+	case JoinType::OUTER:
+		result = PushdownOuterJoin(std::move(op), left_bindings, right_bindings);
+		break;
 	case JoinType::INNER:
 		//	AsOf joins can't push anything into the RHS, so treat it as a left join
 		if (op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN) {
-			return PushdownLeftJoin(std::move(op), left_bindings, right_bindings);
+			result = PushdownLeftJoin(std::move(op), left_bindings, right_bindings);
+			break;
 		}
-		return PushdownInnerJoin(std::move(op), left_bindings, right_bindings);
+		result = PushdownInnerJoin(std::move(op), left_bindings, right_bindings);
+		break;
 	case JoinType::LEFT:
-		return PushdownLeftJoin(std::move(op), left_bindings, right_bindings);
+		result = PushdownLeftJoin(std::move(op), left_bindings, right_bindings);
+		break;
 	case JoinType::MARK:
-		return PushdownMarkJoin(std::move(op), left_bindings, right_bindings);
+		result = PushdownMarkJoin(std::move(op), left_bindings, right_bindings);
+		break;
 	case JoinType::SINGLE:
-		return PushdownSingleJoin(std::move(op), left_bindings, right_bindings);
+		result = PushdownSingleJoin(std::move(op), left_bindings, right_bindings);
+		break;
 	case JoinType::SEMI:
 	case JoinType::ANTI:
-		return PushdownSemiAntiJoin(std::move(op));
+		result = PushdownSemiAntiJoin(std::move(op));
+		break;
 	default:
 		// unsupported join type: stop pushing down
 		return FinishPushdown(std::move(op));
 	}
+
+	if (restore_projection_maps) {
+		switch (result->type) {
+		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+		case LogicalOperatorType::LOGICAL_ASOF_JOIN:
+		case LogicalOperatorType::LOGICAL_ANY_JOIN:
+		case LogicalOperatorType::LOGICAL_DELIM_JOIN: {
+			// Pushing down filter through join didn't change operator type (e.g., LogicalEmptyResult), restore maps
+			auto &result_join = result->Cast<LogicalJoin>();
+			result_join.left_projection_map = std::move(left_projection_map);
+			result_join.right_projection_map = std::move(right_projection_map);
+			break;
+		}
+		default:
+			break;
+		}
+	}
+	return result;
 }
-void FilterPushdown::PushFilters() {
+FilterResult FilterPushdown::PushFilters() {
 	for (auto &f : filters) {
 		auto result = combiner.AddFilter(std::move(f->filter));
 		D_ASSERT(result != FilterResult::UNSUPPORTED);
-		(void)result;
+		if (result == FilterResult::UNSATISFIABLE) {
+			// one of the filters is unsatisfiable - abort filter pushdown
+			return FilterResult::UNSATISFIABLE;
+		}
 	}
 	filters.clear();
+	return FilterResult::SUCCESS;
 }
 
 FilterResult FilterPushdown::AddFilter(unique_ptr<Expression> expr) {
-	PushFilters();
+	if (PushFilters() == FilterResult::UNSATISFIABLE) {
+		return FilterResult::UNSATISFIABLE;
+	}
 	// split up the filters by AND predicate
 	vector<unique_ptr<Expression>> expressions;
 	expressions.push_back(std::move(expr));
@@ -245,6 +289,51 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 	}
 
 	return AddLogicalFilter(std::move(op), std::move(expressions));
+}
+
+unique_ptr<LogicalOperator> FilterPushdown::PushFiltersIntoDelimJoin(unique_ptr<LogicalOperator> op) {
+	for (idx_t i = 0; i < filters.size(); i++) {
+		auto &f = *filters[i];
+		for (auto &child : op->children) {
+			FilterPushdown pushdown(optimizer, convert_mark_joins);
+
+			// check if filter bindings can be applied to the child bindings.
+			auto child_bindings = child->GetColumnBindings();
+			unordered_set<TableIndex> child_bindings_table;
+			for (auto &binding : child_bindings) {
+				child_bindings_table.insert(binding.table_index);
+			}
+
+			// Check if ALL bindings of the filter are present in the child
+			bool should_push = true;
+			for (auto &binding : f.bindings) {
+				if (child_bindings_table.find(binding) == child_bindings_table.end()) {
+					should_push = false;
+					break;
+				}
+			}
+
+			if (!should_push) {
+				continue;
+			}
+
+			// copy the filter
+			auto filter_copy = f.filter->Copy();
+			if (pushdown.AddFilter(std::move(filter_copy)) == FilterResult::UNSATISFIABLE) {
+				return make_uniq<LogicalEmptyResult>(std::move(op));
+			}
+
+			// push the filter into the child.
+			pushdown.GenerateFilters();
+			child = pushdown.Rewrite(std::move(child));
+
+			// Don't push same filter again
+			filters.erase_at(i);
+			i--;
+			break;
+		}
+	}
+	return op;
 }
 
 unique_ptr<LogicalOperator> FilterPushdown::FinishPushdown(unique_ptr<LogicalOperator> op) {

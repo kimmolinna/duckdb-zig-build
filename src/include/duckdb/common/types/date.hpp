@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "duckdb/common/common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/common/types/string_type.hpp"
@@ -17,8 +16,6 @@
 #include <functional>
 
 namespace duckdb {
-
-struct timestamp_t; // NOLINT: primitive case
 
 //! Type used to represent dates (days since 1970-01-01)
 struct date_t { // NOLINT
@@ -81,16 +78,25 @@ struct date_t { // NOLINT
 	static inline date_t epoch() { // NOLINT
 		return date_t(0);
 	} // NOLINT
+
+	inline bool IsFinite() const {
+		return *this != infinity() && *this != ninfinity();
+	}
 };
 
 enum class DateCastResult : uint8_t { SUCCESS, ERROR_INCORRECT_FORMAT, ERROR_RANGE };
 
+struct DateSpecial {
+	const char *str;  // The full string
+	const idx_t abbr; // The abbreviation length
+};
+
 //! The Date class is a static class that holds helper functions for the Date type.
 class Date {
 public:
-	static const char *PINF;  // NOLINT
-	static const char *NINF;  // NOLINT
-	static const char *EPOCH; // NOLINT
+	static const DateSpecial PINF;  // NOLINT
+	static const DateSpecial NINF;  // NOLINT
+	static const DateSpecial EPOCH; // NOLINT
 
 	static const string_t MONTH_NAMES[12];
 	static const string_t MONTH_NAMES_ABBREVIATED[12];
@@ -122,11 +128,23 @@ public:
 	DUCKDB_API static date_t FromString(const string &str, bool strict = false);
 	//! Convert a string in the format "YYYY-MM-DD" to a date object
 	DUCKDB_API static date_t FromCString(const char *str, idx_t len, bool strict = false);
+	//! Convert an infinite temporal object to a string
+	template <typename T>
+	static inline string ToInfinity(const T &t) {
+		if (t == T::infinity()) {
+			return PINF.str;
+		} else if (t == T::ninfinity()) {
+			return NINF.str;
+		} else {
+			D_ASSERT(!t.IsFinite());
+			return string();
+		}
+	}
 	//! Convert a date object to a string in the format "YYYY-MM-DD"
 	DUCKDB_API static string ToString(date_t date);
 	//! Try to convert the string as a give "special" date (e.g, PINF, ...)
 	//! Returns true if it was successful and updates the scan pos.
-	DUCKDB_API static bool TryConvertDateSpecial(const char *buf, idx_t len, idx_t &pos, const char *special);
+	DUCKDB_API static bool TryConvertDateSpecial(const char *buf, idx_t len, idx_t &pos, const DateSpecial &special);
 	//! Try to convert text in a buffer to a date; returns true if parsing was successful
 	//! If the date was a "special" value, the special flag will be set.
 	DUCKDB_API static DateCastResult TryConvertDate(const char *buf, idx_t len, idx_t &pos, date_t &result,
@@ -148,11 +166,6 @@ public:
 	//! Returns true if the specified (year, month, day) combination is a valid
 	//! date
 	DUCKDB_API static bool IsValid(int32_t year, int32_t month, int32_t day);
-
-	//! Returns true if the specified date is finite
-	static inline bool IsFinite(date_t date) {
-		return date != date_t::infinity() && date != date_t::ninfinity();
-	}
 
 	//! The max number of days in a month of a given year
 	DUCKDB_API static int32_t MonthDays(int32_t year, int32_t month);

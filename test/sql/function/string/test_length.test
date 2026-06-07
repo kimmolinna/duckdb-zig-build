@@ -6,9 +6,6 @@ statement ok
 SET default_null_order='nulls_first';
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE strings(s VARCHAR)
 
 statement ok
@@ -30,3 +27,9 @@ NULL
 7
 7
 
+# aliases work
+query II
+SELECT char_length('asdf'), CHARACTER_LENGTH('asdf')
+----
+4
+4

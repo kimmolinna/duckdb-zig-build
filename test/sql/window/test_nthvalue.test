@@ -6,9 +6,6 @@ statement ok
 SET default_null_order='nulls_first';
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE empsalary (depname varchar, empno bigint, salary int, enroll_date date);
 
 statement ok
@@ -109,7 +106,7 @@ SELECT depname, empno,
 		ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
 		) fv
 FROM empno_nulls
-ORDER BY 1, 2
+ORDER BY 1, 2, 3
 ----
 develop	NULL	NULL
 develop	NULL	7

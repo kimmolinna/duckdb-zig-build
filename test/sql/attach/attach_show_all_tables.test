@@ -2,11 +2,6 @@
 # description: Test various DDL statements on an attached database
 # group: [attach]
 
-require noforcestorage
-
-statement ok
-PRAGMA enable_verification
-
 statement ok
 ATTACH DATABASE ':memory:' AS new_database;
 

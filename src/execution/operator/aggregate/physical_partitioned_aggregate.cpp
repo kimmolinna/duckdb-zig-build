@@ -4,11 +4,13 @@
 
 namespace duckdb {
 
-PhysicalPartitionedAggregate::PhysicalPartitionedAggregate(ClientContext &context, vector<LogicalType> types,
+PhysicalPartitionedAggregate::PhysicalPartitionedAggregate(PhysicalPlan &physical_plan, ClientContext &context,
+                                                           vector<LogicalType> types,
                                                            vector<unique_ptr<Expression>> aggregates_p,
                                                            vector<unique_ptr<Expression>> groups_p,
                                                            vector<column_t> partitions_p, idx_t estimated_cardinality)
-    : PhysicalOperator(PhysicalOperatorType::PARTITIONED_AGGREGATE, std::move(types), estimated_cardinality),
+    : PhysicalOperator(physical_plan, PhysicalOperatorType::PARTITIONED_AGGREGATE, std::move(types),
+                       estimated_cardinality),
       partitions(std::move(partitions_p)), groups(std::move(groups_p)), aggregates(std::move(aggregates_p)) {
 }
 
@@ -82,7 +84,7 @@ unique_ptr<GlobalSinkState> PhysicalPartitionedAggregate::GetGlobalSinkState(Cli
 
 unique_ptr<LocalSinkState> PhysicalPartitionedAggregate::GetLocalSinkState(ExecutionContext &context) const {
 	D_ASSERT(sink_state);
-	return make_uniq<PartitionedAggregateLocalSinkState>(*this, children[0]->GetTypes(), context);
+	return make_uniq<PartitionedAggregateLocalSinkState>(*this, children[0].get().GetTypes(), context);
 }
 
 //===--------------------------------------------------------------------===//
@@ -155,7 +157,7 @@ SinkFinalizeType PhysicalPartitionedAggregate::Finalize(Pipeline &pipeline, Even
 		// reference the partitions
 		auto &partitions = StructValue::GetChildren(entry.first);
 		for (idx_t partition_idx = 0; partition_idx < partitions.size(); partition_idx++) {
-			chunk.data[partition_idx].Reference(partitions[partition_idx]);
+			chunk.data[partition_idx].Reference(partitions[partition_idx], count_t(1));
 		}
 		// finalize the aggregates
 		entry.second->Finalize(chunk, partitions.size());
@@ -187,8 +189,8 @@ unique_ptr<GlobalSourceState> PhysicalPartitionedAggregate::GetGlobalSourceState
 	return make_uniq<PartitionedAggregateGlobalSourceState>(gstate);
 }
 
-SourceResultType PhysicalPartitionedAggregate::GetData(ExecutionContext &context, DataChunk &chunk,
-                                                       OperatorSourceInput &input) const {
+SourceResultType PhysicalPartitionedAggregate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                               OperatorSourceInput &input) const {
 	auto &gstate = sink_state->Cast<PartitionedAggregateGlobalSinkState>();
 	auto &gsource = input.global_state.Cast<PartitionedAggregateGlobalSourceState>();
 	gstate.aggregate_result.Scan(gsource.scan_state, chunk);
@@ -215,11 +217,12 @@ InsertionOrderPreservingMap<string> PhysicalPartitionedAggregate::ParamsToString
 			aggregate_info += "\n";
 		}
 		aggregate_info += aggregates[i]->GetName();
-		if (aggregate.filter) {
-			aggregate_info += " Filter: " + aggregate.filter->GetName();
+		if (aggregate.GetFilter()) {
+			aggregate_info += " Filter: " + aggregate.GetFilter()->GetName();
 		}
 	}
 	result["Aggregates"] = aggregate_info;
+	SetEstimatedCardinality(result, estimated_cardinality);
 	return result;
 }
 

@@ -8,18 +8,50 @@
 
 namespace duckdb {
 
-BoundAggregateExpression::BoundAggregateExpression(AggregateFunction function, vector<unique_ptr<Expression>> children,
+BoundAggregateExpression::BoundAggregateExpression(BoundAggregateFunction function,
+                                                   vector<unique_ptr<Expression>> children,
                                                    unique_ptr<Expression> filter, unique_ptr<FunctionData> bind_info,
                                                    AggregateType aggr_type)
-    : Expression(ExpressionType::BOUND_AGGREGATE, ExpressionClass::BOUND_AGGREGATE, function.return_type),
+    : Expression(ExpressionType::BOUND_AGGREGATE, ExpressionClass::BOUND_AGGREGATE, function.GetReturnType()),
       function(std::move(function)), children(std::move(children)), bind_info(std::move(bind_info)),
       aggr_type(aggr_type), filter(std::move(filter)) {
-	D_ASSERT(!this->function.name.empty());
+	D_ASSERT(!this->function.GetName().empty());
 }
 
 string BoundAggregateExpression::ToString() const {
-	return FunctionExpression::ToString<BoundAggregateExpression, Expression, BoundOrderModifier>(
-	    *this, string(), string(), function.name, false, IsDistinct(), filter.get(), order_bys.get());
+	auto distinct = IsDistinct();
+	auto &function_name = function.GetName();
+
+	string result;
+	result += SQLIdentifier(function_name);
+	result += "(";
+	if (distinct) {
+		result += "DISTINCT ";
+	}
+	result += StringUtil::Join(children, children.size(), ", ",
+	                           [&](const unique_ptr<Expression> &child) { return child->ToString(); });
+
+	// ordered aggregate
+	if (order_bys && !order_bys->orders.empty()) {
+		if (children.empty()) {
+			result += ") WITHIN GROUP (";
+		}
+		result += " ORDER BY ";
+		for (idx_t i = 0; i < order_bys->orders.size(); i++) {
+			if (i > 0) {
+				result += ", ";
+			}
+			result += order_bys->orders[i].ToString();
+		}
+	}
+	result += ")";
+
+	// filtered aggregate
+	if (filter) {
+		result += " FILTER (WHERE " + filter->ToString() + ")";
+	}
+
+	return result;
 }
 
 hash_t BoundAggregateExpression::Hash() const {
@@ -51,7 +83,7 @@ bool BoundAggregateExpression::Equals(const BaseExpression &other_p) const {
 			return false;
 		}
 	}
-	if (!FunctionData::Equals(bind_info.get(), other.bind_info.get())) {
+	if (!FunctionData::Equals(bind_info.get(), other.BindInfo().get())) {
 		return false;
 	}
 	if (!BoundOrderModifier::Equals(order_bys, other.order_bys)) {
@@ -61,8 +93,9 @@ bool BoundAggregateExpression::Equals(const BaseExpression &other_p) const {
 }
 
 bool BoundAggregateExpression::PropagatesNullValues() const {
-	return function.null_handling == FunctionNullHandling::SPECIAL_HANDLING ? false
-	                                                                        : Expression::PropagatesNullValues();
+	return function.GetProperties().GetNullHandling() == FunctionNullHandling::SPECIAL_HANDLING
+	           ? false
+	           : Expression::PropagatesNullValues();
 }
 
 unique_ptr<Expression> BoundAggregateExpression::Copy() const {
@@ -93,7 +126,7 @@ void BoundAggregateExpression::Serialize(Serializer &serializer) const {
 unique_ptr<Expression> BoundAggregateExpression::Deserialize(Deserializer &deserializer) {
 	auto return_type = deserializer.ReadProperty<LogicalType>(200, "return_type");
 	auto children = deserializer.ReadProperty<vector<unique_ptr<Expression>>>(201, "children");
-	auto entry = FunctionSerializer::Deserialize<AggregateFunction, AggregateFunctionCatalogEntry>(
+	auto entry = FunctionSerializer::Deserialize<BoundAggregateFunction, AggregateFunctionCatalogEntry>(
 	    deserializer, CatalogType::AGGREGATE_FUNCTION_ENTRY, children, return_type);
 	auto aggregate_type = deserializer.ReadProperty<AggregateType>(203, "aggregate_type");
 	auto filter =

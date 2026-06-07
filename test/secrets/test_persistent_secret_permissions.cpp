@@ -1,7 +1,7 @@
 #include "catch.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/secret/secret_storage.hpp"
@@ -15,7 +15,6 @@
 #endif
 
 using namespace duckdb;
-using namespace std;
 
 #ifndef _WIN32
 static void assert_correct_permission(string file) {

@@ -3,9 +3,6 @@
 # group: [exists]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 create or replace table t1(c1 int64);
 
 statement ok
@@ -21,5 +18,10 @@ select c1, not exists (select 1 from t2 where t1.c1 <= t2.c1) from t1;
 
 query I
 select c1 from t1 where not exists (select 1 from t2 where t1.c1 <= t2.c1);
+----
+1
+
+query I
+select c1 from t1 anti join t2 on (t1.c1 <= t2.c1)
 ----
 1

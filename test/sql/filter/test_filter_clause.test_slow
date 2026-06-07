@@ -2,12 +2,6 @@
 # description: Test aggregation with filter clause
 # group: [filter]
 
-require skip_reload
-
-
-statement ok
-PRAGMA enable_verification
-
 statement ok
 create temporary table t as select range i, mod(range,10) j,mod(range,10)*10000000 k from range(1000);
 

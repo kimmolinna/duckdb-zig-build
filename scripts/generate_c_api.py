@@ -46,13 +46,12 @@ CAPI_FUNCTION_DEFINITION_FILES = 'src/include/duckdb/main/capi/header_generation
 ORIGINAL_FUNCTION_GROUP_ORDER = [
     'open_connect',
     'configuration',
+    'error_data',
     'query_execution',
-    'result_functions',
     'safe_fetch_functions',
     'helpers',
     'date_time_timestamp_helpers',
-    'hugeint_helpers',
-    'unsigned_hugeint_helpers',
+    'hugeint_and_uhugeint_helpers',
     'decimal_helpers',
     'prepared_statements',
     'bind_values_to_prepared_statements',
@@ -65,6 +64,7 @@ ORIGINAL_FUNCTION_GROUP_ORDER = [
     'vector_interface',
     'validity_mask_functions',
     'scalar_functions',
+    'selection_vector_interface',
     'aggregate_functions',
     'table_functions',
     'table_function_bind',
@@ -78,6 +78,14 @@ ORIGINAL_FUNCTION_GROUP_ORDER = [
     'threading_information',
     'streaming_result_interface',
     'cast_functions',
+    'expression_interface',
+    'file_system_interface',
+    'config_options_interface',
+    'copy_functions',
+    'catalog_interface',
+    'logging',
+    'geometry_helpers',
+    'variant_helpers',
 ]
 
 # The file that forms the base for the header generation
@@ -289,6 +297,27 @@ def create_function_comment(function_obj):
     return result
 
 
+def create_parameter_list(function_obj):
+    params = function_obj.get('params', [])
+    if len(params) == 0:
+        return 'void'
+
+    result = ''
+    for param in params:
+        param_type = param['type']
+        param_name = param['name']
+        result += f'{param_type}'
+        if result[-1] != '*':
+            result += ' '
+        result += f'{param_name}, '
+    return result[:-2]  # Trailing comma
+
+
+def create_argument_list(function_obj):
+    params = function_obj.get('params', [])
+    return ', '.join(param['name'] for param in params)
+
+
 # Creates the function declaration for the regular C header file
 def create_function_declaration(function_obj):
     result = ''
@@ -300,17 +329,7 @@ def create_function_declaration(function_obj):
     if result[-1] != '*':
         result += ' '
     result += f'{function_name}('
-
-    if 'params' in function_obj:
-        if len(function_obj['params']) > 0:
-            for param in function_obj['params']:
-                param_type = param['type']
-                param_name = param['name']
-                result += f'{param_type}'
-                if result[-1] != '*':
-                    result += ' '
-                result += f'{param_name}, '
-            result = result[:-2]  # Trailing comma
+    result += create_parameter_list(function_obj)
     result += ');\n'
 
     return result
@@ -323,13 +342,7 @@ def create_struct_member(function_obj):
     function_name = function_obj['name']
     function_return_type = function_obj['return_type']
     result += f'    {function_return_type} (*{function_name})('
-    if 'params' in function_obj:
-        if len(function_obj['params']) > 0:
-            for param in function_obj['params']:
-                param_type = param['type']
-                param_name = param['name']
-                result += f'{param_type} {param_name},'
-            result = result[:-1]  # Trailing comma
+    result += create_parameter_list(function_obj)
     result += ');'
 
     return result
@@ -341,8 +354,75 @@ def create_function_typedef(function_obj):
     return f'#define {function_name} {DUCKDB_EXT_API_VAR_NAME}.{function_name}\n'
 
 
+def headline_capitalize(s, i):
+    if i > 0 and s in [
+        "a",
+        "an",
+        "the",
+        "and",
+        "but",
+        "or",
+        "nor",
+        "for",
+        "so",
+        "yet",
+        "about",
+        "above",
+        "across",
+        "after",
+        "against",
+        "along",
+        "among",
+        "around",
+        "at",
+        "before",
+        "behind",
+        "below",
+        "beneath",
+        "beside",
+        "between",
+        "beyond",
+        "by",
+        "despite",
+        "down",
+        "during",
+        "except",
+        "for",
+        "from",
+        "in",
+        "inside",
+        "into",
+        "like",
+        "near",
+        "of",
+        "off",
+        "on",
+        "onto",
+        "out",
+        "outside",
+        "over",
+        "past",
+        "since",
+        "through",
+        "throughout",
+        "to",
+        "toward",
+        "under",
+        "underneath",
+        "until",
+        "up",
+        "upon",
+        "with",
+        "within",
+        "without",
+    ]:
+        return s
+    else:
+        return s.capitalize()
+
+
 def to_camel_case(snake_str):
-    return " ".join(x.capitalize() for x in snake_str.lower().split("_"))
+    return " ".join(headline_capitalize(s, i) for i, s in enumerate(snake_str.lower().split("_")))
 
 
 def parse_semver(version):
@@ -372,6 +452,31 @@ def create_version_defines(version):
     return result
 
 
+def comment_function_group(name, deprecated, use_instead, description):
+    text = '//----------------------------------------------------------------------------------------------------------------------'
+    text += '\n// ' + name
+    text += '\n//----------------------------------------------------------------------------------------------------------------------'
+
+    text += '\n// DESCRIPTION:'
+    text += '\n// ' + description
+
+    if deprecated:
+        text += '\n//\n// DEPRECATION NOTICE:\n// This function group is deprecated and scheduled for removal.'
+        if use_instead != "":
+            text += '\n//'
+            text += '\n// USE INSTEAD:'
+            text += '\n//' + use_instead
+        else:
+            print(f"Function group {name} marked as deprecated without 'use_instead' instructions!")
+            exit(1)
+    elif use_instead != "":
+        print(f"Function group {name} not marked as deprecated but has 'use_instead' instructions!")
+        exit(1)
+
+    text += '\n//----------------------------------------------------------------------------------------------------------------------\n\n'
+    return text
+
+
 # Create duckdb.h
 def create_duckdb_h(file, function_groups, write_functions=True):
     declarations = ''
@@ -382,13 +487,21 @@ def create_duckdb_h(file, function_groups, write_functions=True):
         declarations += '\n'
 
         for curr_group in function_groups:
-            declarations += COMMENT_HEADER(to_camel_case(curr_group['group']))
+            group_name = to_camel_case(curr_group['group'])
+            group_is_deprecated = 'deprecated' in curr_group and curr_group['deprecated']
+
+            use_instead = ""
+            if 'use_instead' in curr_group:
+                use_instead = curr_group['use_instead']
+
+            if not 'description' in curr_group:
+                raise Exception(f"Group {group_name} does not have a description!")
+            description = curr_group['description']
+
+            declarations += comment_function_group(group_name, group_is_deprecated, use_instead, description)
             declarations += '\n'
-            if 'description' in curr_group:
-                declarations += curr_group['description'] + '\n'
 
             deprecated_state = False
-            group_is_deprecated = 'deprecated' in curr_group and curr_group['deprecated']
             if group_is_deprecated:
                 declarations += f'#ifndef DUCKDB_API_NO_DEPRECATED\n'
                 deprecated_state = True
@@ -396,7 +509,7 @@ def create_duckdb_h(file, function_groups, write_functions=True):
             for function in curr_group['entries']:
                 function_is_deprecated = group_is_deprecated or ('deprecated' in function and function['deprecated'])
                 if deprecated_state and not function_is_deprecated:
-                    declarations += '#endif\n'
+                    declarations += '#endif\n\n'
                     deprecated_state = False
                 elif not deprecated_state and function_is_deprecated:
                     declarations += '#ifndef DUCKDB_API_NO_DEPRECATED\n'
@@ -419,7 +532,7 @@ def create_duckdb_h(file, function_groups, write_functions=True):
                 declarations += '\n'
 
             if deprecated_state:
-                declarations += '#endif\n'
+                declarations += '#endif\n\n'
 
     declarations += '#endif\n'
 
@@ -456,23 +569,10 @@ def create_struct_member_invoker(function_obj):
     if result[-1] != '*':
         result += ' '
     result += f'{function_name}('
-    invoked_params = ''
-
-    if 'params' in function_obj:
-        if len(function_obj['params']) > 0:
-            for param in function_obj['params']:
-                param_type = param['type']
-                param_name = param['name']
-                result += f'{param_type}'
-                if result[-1] != '*':
-                    result += ' '
-                result += f'{param_name}, '
-                invoked_params += f'{param_name}, '
-            result = result[:-2]  # Trailing comma
+    result += create_parameter_list(function_obj)
     result += ') {\n'
 
-    if invoked_params != '':
-        invoked_params = invoked_params[:-2]  # Trailing comma
+    invoked_params = create_argument_list(function_obj)
     result += f'\treturn duckdb_ext_api->{function_name}({invoked_params}); \n'
     result += '}'
     return result
@@ -597,7 +697,7 @@ def create_extension_api_struct(
 
     if with_create_method:
         extension_struct_finished += COMMENT_HEADER("Struct Create Method")
-        extension_struct_finished += f"inline {DUCKDB_EXT_API_STRUCT_TYPENAME} {create_method_name}() {{\n"
+        extension_struct_finished += f"inline {DUCKDB_EXT_API_STRUCT_TYPENAME} {create_method_name}(void) {{\n"
         extension_struct_finished += f"    {DUCKDB_EXT_API_STRUCT_TYPENAME} result;\n"
 
         for api_version_entry in api_definition:

@@ -1,3 +1,11 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// duckdb/storage/buffer/temporary_file_information.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
 #pragma once
 
 #include "duckdb/common/common.hpp"
@@ -14,6 +22,21 @@ struct MemoryInformation {
 struct TemporaryFileInformation {
 	string path;
 	idx_t size;
+};
+
+struct CachedFileInformation {
+	string path;
+	idx_t nr_bytes;
+	idx_t location;
+	bool loaded;
+};
+
+struct EvictionQueueInformation {
+	idx_t queue_index;
+	string queue_type;
+	idx_t approximate_size;
+	idx_t dead_nodes;
+	idx_t total_insertions;
 };
 
 } // namespace duckdb

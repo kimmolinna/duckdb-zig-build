@@ -3,17 +3,32 @@
 #include "duckdb/function/table/range.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/parser/statement/multi_statement.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
 
 namespace duckdb {
 
 static unique_ptr<SubqueryRef> ParseSubquery(const string &query, const ParserOptions &options, const string &err_msg) {
 	Parser parser(options);
 	parser.ParseQuery(query);
-	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
+	if (parser.statements.size() != 1) {
 		throw ParserException(err_msg);
 	}
-	auto select_stmt = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(parser.statements[0]));
-	return duckdb::make_uniq<SubqueryRef>(std::move(select_stmt));
+
+	auto &stmt = parser.statements[0];
+
+	if (stmt->type == StatementType::SELECT_STATEMENT) {
+		// Regular SELECT statement
+		auto select_stmt = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(stmt));
+		return duckdb::make_uniq<SubqueryRef>(std::move(select_stmt));
+	} else if (stmt->type == StatementType::MULTI_STATEMENT) {
+		// MultiStatement (e.g., from PIVOT statements that create enum types)
+		throw ParserException(
+		    "PIVOT statements without explicit IN clauses are not supported in query() function. "
+		    "Please specify the pivot values explicitly, e.g.: PIVOT ... ON col IN (val1, val2, ...)");
+	} else {
+		throw ParserException(err_msg);
+	}
 }
 
 static string UnionTablesQuery(TableFunctionBindInput &input) {
@@ -74,10 +89,10 @@ void QueryTableFunction::RegisterFunction(BuiltinFunctions &set) {
 	query_table_function.bind_replace = TableBindReplace;
 	query_table.AddFunction(query_table_function);
 
-	query_table_function.arguments = {LogicalType::LIST(LogicalType::VARCHAR)};
+	query_table_function.GetArguments() = {LogicalType::LIST(LogicalType::VARCHAR)};
 	query_table.AddFunction(query_table_function);
 	// add by_name option
-	query_table_function.arguments.emplace_back(LogicalType::BOOLEAN);
+	query_table_function.GetArguments().emplace_back(LogicalType::BOOLEAN);
 	query_table.AddFunction(query_table_function);
 	set.AddFunction(query_table);
 }

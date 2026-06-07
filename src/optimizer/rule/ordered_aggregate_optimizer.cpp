@@ -17,27 +17,29 @@ OrderedAggregateOptimizer::OrderedAggregateOptimizer(ExpressionRewriter &rewrite
 }
 
 unique_ptr<Expression> OrderedAggregateOptimizer::Apply(ClientContext &context, BoundAggregateExpression &aggr,
-                                                        vector<unique_ptr<Expression>> &groups, bool &changes_made) {
-	if (!aggr.order_bys) {
+                                                        vector<unique_ptr<Expression>> &groups,
+                                                        optional_ptr<vector<GroupingSet>> grouping_sets,
+                                                        bool &changes_made) {
+	if (!aggr.GetOrderBys()) {
 		// no ORDER BYs defined
 		return nullptr;
 	}
-	if (aggr.function.order_dependent == AggregateOrderDependent::NOT_ORDER_DEPENDENT) {
+	if (aggr.Function().GetOrderDependent() == AggregateOrderDependent::NOT_ORDER_DEPENDENT) {
 		// not an order dependent aggregate but we have an ORDER BY clause - remove it
-		aggr.order_bys.reset();
+		aggr.GetOrderBysMutable().reset();
 		changes_made = true;
 		return nullptr;
 	}
 
 	// Remove unnecessary ORDER BY clauses and return if nothing remains
-	if (aggr.order_bys->Simplify(groups)) {
-		aggr.order_bys.reset();
+	if (aggr.GetOrderBysMutable()->Simplify(groups, grouping_sets)) {
+		aggr.GetOrderBysMutable().reset();
 		changes_made = true;
 		return nullptr;
 	}
 
 	//	Rewrite first/last/arbitrary/any_value to use arg_xxx[_null] and create_sort_key
-	const auto &aggr_name = aggr.function.name;
+	const auto &aggr_name = aggr.Function().GetName();
 	string arg_xxx_name;
 	if (aggr_name == "last") {
 		arg_xxx_name = "arg_max_null";
@@ -51,16 +53,11 @@ unique_ptr<Expression> OrderedAggregateOptimizer::Apply(ClientContext &context, 
 
 	FunctionBinder binder(context);
 	vector<unique_ptr<Expression>> sort_children;
-	for (auto &order : aggr.order_bys->orders) {
+	for (auto &order : aggr.GetOrderBysMutable()->orders) {
 		sort_children.emplace_back(std::move(order.expression));
-
-		string modifier;
-		modifier += (order.type == OrderType::ASCENDING) ? "ASC" : "DESC";
-		modifier += " NULLS";
-		modifier += (order.null_order == OrderByNullType::NULLS_FIRST) ? " FIRST" : " LAST";
-		sort_children.emplace_back(make_uniq<BoundConstantExpression>(Value(modifier)));
+		sort_children.emplace_back(make_uniq<BoundConstantExpression>(Value(order.GetOrderModifier())));
 	}
-	aggr.order_bys.reset();
+	aggr.GetOrderBysMutable().reset();
 
 	ErrorData error;
 	auto sort_key = binder.BindScalarFunction(DEFAULT_SCHEMA, "create_sort_key", std::move(sort_children), error);
@@ -68,7 +65,7 @@ unique_ptr<Expression> OrderedAggregateOptimizer::Apply(ClientContext &context, 
 		error.Throw();
 	}
 
-	auto &children = aggr.children;
+	auto &children = aggr.GetChildrenMutable();
 	children.emplace_back(std::move(sort_key));
 
 	//  Look up the arg_xxx_name function in the catalog
@@ -80,22 +77,29 @@ unique_ptr<Expression> OrderedAggregateOptimizer::Apply(ClientContext &context, 
 	// bind the aggregate
 	vector<LogicalType> types;
 	for (const auto &child : children) {
-		types.emplace_back(child->return_type);
+		types.emplace_back(child->GetReturnType());
 	}
 	auto best_function = binder.BindFunction(func.name, func.functions, types, error);
 	if (!best_function.IsValid()) {
 		error.Throw();
 	}
 	// found a matching function!
-	auto bound_function = func.functions.GetFunctionByOffset(best_function.GetIndex());
-	return binder.BindAggregateFunction(bound_function, std::move(children), std::move(aggr.filter),
+	const auto &bound_function = func.functions.GetFunctionByOffset(best_function.GetIndex());
+	return binder.BindAggregateFunction(bound_function, std::move(children), std::move(aggr.GetFilterMutable()),
 	                                    aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT);
 }
 
 unique_ptr<Expression> OrderedAggregateOptimizer::Apply(LogicalOperator &op, vector<reference<Expression>> &bindings,
                                                         bool &changes_made, bool is_root) {
 	auto &aggr = bindings[0].get().Cast<BoundAggregateExpression>();
-	return Apply(rewriter.context, aggr, op.Cast<LogicalAggregate>().groups, changes_made);
+
+	// only apply to LogicalAggregate nodes
+	if (op.type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return nullptr;
+	}
+
+	return Apply(rewriter.context, aggr, op.Cast<LogicalAggregate>().groups, op.Cast<LogicalAggregate>().grouping_sets,
+	             changes_made);
 }
 
 } // namespace duckdb

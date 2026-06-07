@@ -123,22 +123,26 @@ select list_aggr([0, 0], 'stddev')
 ----
 0
 
-statement error
+query R
 select list_aggr([1e301, -1e301], 'stddev')
 ----
+inf
 
-statement error
+query R
 select list_var_samp([1e301, -1e301])
 ----
+inf
 
-statement error
+query R
 select list_var_pop([1e301, -1e301])
 ----
+inf
 
 # incorrect usage
 statement error
 SELECT list_stddev_samp()
 ----
+<REGEX>:.*Binder Error.*does not support the supplied arguments.*
 
 # stddev_pop unexpectedly does not fetch any rows, test for list_stddev_pop
 statement ok
@@ -147,6 +151,7 @@ CREATE TABLE t0 (c0 DOUBLE[]);
 statement ok
 INSERT INTO t0 VALUES([1E200, 0]);
 
-statement error
+query R
 SELECT list_stddev_pop(c0) FROM t0;
 ----
+inf

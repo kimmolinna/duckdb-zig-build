@@ -2,12 +2,10 @@
 # description: Usage of STORED generated column
 # group: [stored]
 
-statement ok
-PRAGMA enable_verification
-
 statement error
 CREATE TABLE tbl (
 	price INTEGER,
 	gcol AS (price) STORED,
 );
 ----
+<REGEX>:.*Invalid Input Error.*Can not create.*

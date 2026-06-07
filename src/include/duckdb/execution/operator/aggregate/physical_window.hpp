@@ -20,8 +20,10 @@ public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::WINDOW;
 
 public:
-	PhysicalWindow(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list, idx_t estimated_cardinality,
-	               PhysicalOperatorType type = PhysicalOperatorType::WINDOW);
+	PhysicalWindow(PhysicalPlan &physical_plan, vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
+	               idx_t estimated_cardinality, vector<column_t> partitions);
+	PhysicalWindow(PhysicalPlan &physical_plan, vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
+	               idx_t estimated_cardinality);
 
 	//! The projection list of the WINDOW statement (may contain aggregates)
 	vector<unique_ptr<Expression>> select_list;
@@ -30,13 +32,16 @@ public:
 	//! Whether or not the window is order dependent (only true if ANY window function contains neither an order nor a
 	//! partition clause)
 	bool is_order_dependent;
+	//! The partitions over which this is grouped (if any)
+	OperatorPartitionInfo partition_info;
 
 public:
 	// Source interface
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
 	OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
 	                                       LocalSourceState &lstate,
 	                                       const OperatorPartitionInfo &partition_info) const override;
@@ -55,13 +60,18 @@ public:
 
 public:
 	// Sink interface
+	SinkNextBatchType NextBatch(ExecutionContext &context, OperatorSinkNextBatchInput &input) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
+	ProgressData GetSinkProgress(ClientContext &context, GlobalSinkState &gstate,
+	                             const ProgressData source_progress) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
+
+	OperatorPartitionInfo RequiredPartitionInfo() const override;
 
 	bool IsSink() const override {
 		return true;

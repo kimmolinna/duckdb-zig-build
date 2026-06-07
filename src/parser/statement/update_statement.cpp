@@ -1,5 +1,6 @@
 #include "duckdb/parser/statement/update_statement.hpp"
-#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/query_node/update_query_node.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 
 namespace duckdb {
 
@@ -15,65 +16,58 @@ UpdateSetInfo::UpdateSetInfo(const UpdateSetInfo &other) : columns(other.columns
 	}
 }
 
-unique_ptr<UpdateSetInfo> UpdateSetInfo::Copy() const {
-	return unique_ptr<UpdateSetInfo>(new UpdateSetInfo(*this));
-}
-
-UpdateStatement::UpdateStatement() : SQLStatement(StatementType::UPDATE_STATEMENT) {
-}
-
-UpdateStatement::UpdateStatement(const UpdateStatement &other)
-    : SQLStatement(other), table(other.table->Copy()), set_info(other.set_info->Copy()) {
-	if (other.from_table) {
-		from_table = other.from_table->Copy();
-	}
-	for (auto &expr : other.returning_list) {
-		returning_list.emplace_back(expr->Copy());
-	}
-	cte_map = other.cte_map.Copy();
-}
-
-string UpdateStatement::ToString() const {
-	D_ASSERT(set_info);
-	auto &condition = set_info->condition;
-	auto &columns = set_info->columns;
-	auto &expressions = set_info->expressions;
-
+string UpdateSetInfo::ToString() const {
 	string result;
-	result = cte_map.ToString();
-	result += "UPDATE ";
-	result += table->ToString();
-	result += " SET ";
+	result += "SET ";
 	D_ASSERT(columns.size() == expressions.size());
 	for (idx_t i = 0; i < columns.size(); i++) {
 		if (i > 0) {
 			result += ", ";
 		}
-		result += KeywordHelper::WriteOptionallyQuoted(columns[i]);
+		result += SQLIdentifier(columns[i]);
 		result += " = ";
 		result += expressions[i]->ToString();
 	}
-	if (from_table) {
-		result += " FROM " + from_table->ToString();
+	return result;
+}
+
+unique_ptr<UpdateSetInfo> UpdateSetInfo::Copy() const {
+	return unique_ptr<UpdateSetInfo>(new UpdateSetInfo(*this));
+}
+
+bool UpdateSetInfo::Equals(const unique_ptr<UpdateSetInfo> &left, const unique_ptr<UpdateSetInfo> &right) {
+	if (!left && !right) {
+		return true;
 	}
-	if (condition) {
-		result += " WHERE " + condition->ToString();
+	if (!left || !right) {
+		return false;
 	}
-	if (!returning_list.empty()) {
-		result += " RETURNING ";
-		for (idx_t i = 0; i < returning_list.size(); i++) {
-			if (i > 0) {
-				result += ", ";
-			}
-			auto column = returning_list[i]->ToString();
-			if (!returning_list[i]->GetAlias().empty()) {
-				column +=
-				    StringUtil::Format(" AS %s", KeywordHelper::WriteOptionallyQuoted(returning_list[i]->GetAlias()));
-			}
-			result += column;
+	if (left->columns != right->columns) {
+		return false;
+	}
+	if (left->expressions.size() != right->expressions.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < left->expressions.size(); i++) {
+		if (!ParsedExpression::Equals(left->expressions[i], right->expressions[i])) {
+			return false;
 		}
 	}
-	return result;
+	return ParsedExpression::Equals(left->condition, right->condition);
+}
+
+UpdateStatement::UpdateStatement() : SQLStatement(StatementType::UPDATE_STATEMENT), node(make_uniq<UpdateQueryNode>()) {
+}
+
+UpdateStatement::~UpdateStatement() {
+}
+
+UpdateStatement::UpdateStatement(const UpdateStatement &other)
+    : SQLStatement(other), node(unique_ptr_cast<QueryNode, UpdateQueryNode>(other.node->Copy())) {
+}
+
+string UpdateStatement::ToString() const {
+	return node->ToString();
 }
 
 unique_ptr<SQLStatement> UpdateStatement::Copy() const {

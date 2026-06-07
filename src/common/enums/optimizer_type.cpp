@@ -3,6 +3,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/parser_exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/optimizer/optimizer.hpp"
 
 namespace duckdb {
 
@@ -28,7 +29,9 @@ static const DefaultOptimizerType internal_optimizer_types[] = {
     {"common_aggregate", OptimizerType::COMMON_AGGREGATE},
     {"column_lifetime", OptimizerType::COLUMN_LIFETIME},
     {"limit_pushdown", OptimizerType::LIMIT_PUSHDOWN},
+    {"row_group_pruner", OptimizerType::ROW_GROUP_PRUNER},
     {"top_n", OptimizerType::TOP_N},
+    {"top_n_window_elimination", OptimizerType::TOP_N_WINDOW_ELIMINATION},
     {"build_side_probe_side", OptimizerType::BUILD_SIDE_PROBE_SIDE},
     {"compressed_materialization", OptimizerType::COMPRESSED_MATERIALIZATION},
     {"duplicate_groups", OptimizerType::DUPLICATE_GROUPS},
@@ -37,8 +40,18 @@ static const DefaultOptimizerType internal_optimizer_types[] = {
     {"join_filter_pushdown", OptimizerType::JOIN_FILTER_PUSHDOWN},
     {"extension", OptimizerType::EXTENSION},
     {"materialized_cte", OptimizerType::MATERIALIZED_CTE},
-    {"sum_rewriter", OptimizerType::SUM_REWRITER},
+    {"aggregate_function_rewriter", OptimizerType::AGGREGATE_FUNCTION_REWRITER},
     {"late_materialization", OptimizerType::LATE_MATERIALIZATION},
+    {"cte_inlining", OptimizerType::CTE_INLINING},
+    {"common_subplan", OptimizerType::COMMON_SUBPLAN},
+    {"join_elimination", OptimizerType::JOIN_ELIMINATION},
+    {"window_self_join", OptimizerType::WINDOW_SELF_JOIN},
+    {"projection_pullup", OptimizerType::PROJECTION_PULLUP},
+    {"outer_join_simplification", OptimizerType::OUTER_JOIN_SIMPLIFICATION},
+    {"window_rewriter", OptimizerType::ROW_NUMBER_REWRITER},
+    {"partitioned_execution", OptimizerType::PARTITIONED_EXECUTION},
+    {"partial_aggregate_pushdown", OptimizerType::PARTIAL_AGGREGATE_PUSHDOWN},
+    {"remote_pushdown", OptimizerType::REMOTE_PUSHDOWN},
     {nullptr, OptimizerType::INVALID}};
 
 string OptimizerTypeToString(OptimizerType type) {

@@ -3,10 +3,12 @@
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/function/function_binder.hpp"
 
 namespace duckdb {
+constexpr const char *CollateCatalogEntry::Name;
 
 bool PushVarcharCollation(ClientContext &context, unique_ptr<Expression> &source, const LogicalType &sql_type,
                           CollationType type) {
@@ -18,7 +20,7 @@ bool PushVarcharCollation(ClientContext &context, unique_ptr<Expression> &source
 	auto str_collation = StringType::GetCollation(sql_type);
 	string collation;
 	if (str_collation.empty()) {
-		collation = DBConfig::GetConfig(context).options.collation;
+		collation = Settings::Get<DefaultCollationSetting>(context);
 	} else {
 		collation = str_collation;
 	}
@@ -77,7 +79,29 @@ bool PushTimeTZCollation(ClientContext &context, unique_ptr<Expression> &source,
 	if (function_entry.functions.Size() != 1) {
 		throw InternalException("timetz_byte_comparable should only have a single overload");
 	}
-	auto &scalar_function = function_entry.functions.GetFunctionReferenceByOffset(0);
+	const auto &scalar_function = function_entry.functions.GetFunctionByOffset(0);
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(source));
+
+	FunctionBinder function_binder(context);
+	auto function = function_binder.BindScalarFunction(scalar_function, std::move(children));
+	source = std::move(function);
+	return true;
+}
+
+bool PushBitStringCollation(ClientContext &context, unique_ptr<Expression> &source, const LogicalType &sql_type,
+                            CollationType) {
+	if (sql_type.id() != LogicalTypeId::BIT) {
+		return false;
+	}
+
+	auto &catalog = Catalog::GetSystemCatalog(context);
+	auto &function_entry =
+	    catalog.GetEntry<ScalarFunctionCatalogEntry>(context, DEFAULT_SCHEMA, "bitstring_byte_comparable");
+	if (function_entry.functions.Size() != 1) {
+		throw InternalException("bitstring_byte_comparable should only have a single overload");
+	}
+	const auto &scalar_function = function_entry.functions.GetFunctionByOffset(0);
 	vector<unique_ptr<Expression>> children;
 	children.push_back(std::move(source));
 
@@ -98,7 +122,7 @@ bool PushIntervalCollation(ClientContext &context, unique_ptr<Expression> &sourc
 	if (function_entry.functions.Size() != 1) {
 		throw InternalException("normalized_interval should only have a single overload");
 	}
-	auto &scalar_function = function_entry.functions.GetFunctionReferenceByOffset(0);
+	const auto &scalar_function = function_entry.functions.GetFunctionByOffset(0);
 	vector<unique_ptr<Expression>> children;
 	children.push_back(std::move(source));
 
@@ -108,11 +132,35 @@ bool PushIntervalCollation(ClientContext &context, unique_ptr<Expression> &sourc
 	return true;
 }
 
+bool PushVariantCollation(ClientContext &context, unique_ptr<Expression> &source, const LogicalType &sql_type,
+                          CollationType) {
+	if (sql_type.id() != LogicalTypeId::VARIANT) {
+		return false;
+	}
+	auto &catalog = Catalog::GetSystemCatalog(context);
+	auto &function_entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(context, DEFAULT_SCHEMA, "variant_normalize");
+	if (function_entry.functions.Size() != 1) {
+		throw InternalException("variant_normalize should only have a single overload");
+	}
+	auto source_alias = source->GetAlias();
+	const auto &scalar_function = function_entry.functions.GetFunctionByOffset(0);
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(source));
+
+	FunctionBinder function_binder(context);
+	auto function = function_binder.BindScalarFunction(scalar_function, std::move(children));
+	function->SetAlias(source_alias);
+	source = std::move(function);
+	return true;
+}
+
 // timetz_byte_comparable
 CollationBinding::CollationBinding() {
 	RegisterCollation(CollationCallback(PushVarcharCollation));
 	RegisterCollation(CollationCallback(PushTimeTZCollation));
+	RegisterCollation(CollationCallback(PushBitStringCollation));
 	RegisterCollation(CollationCallback(PushIntervalCollation));
+	RegisterCollation(CollationCallback(PushVariantCollation));
 }
 
 void CollationBinding::RegisterCollation(CollationCallback callback) {

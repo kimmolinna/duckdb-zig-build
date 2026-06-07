@@ -1,0 +1,153 @@
+#include "duckdb/function/scalar/geometry_functions.hpp"
+#include "duckdb/common/types/geometry.hpp"
+#include "duckdb/common/types/geometry_crs.hpp"
+#include "duckdb/common/vector_operations/binary_executor.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+
+namespace duckdb {
+
+static void FromWKBFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	Geometry::FromBinary(input.data[0], result, input.size(), true);
+}
+
+ScalarFunction StGeomfromwkbFun::GetFunction() {
+	ScalarFunction function({LogicalType::BLOB}, LogicalType::GEOMETRY(), FromWKBFunction);
+	return function;
+}
+
+static void ToWKBFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(input.data[0], result, [&](const string_t &geom) {
+		// TODO: convert to internal representation
+		return geom;
+	});
+	// Add a heap reference to the input WKB to prevent it from being freed
+	StringVector::AddHeapReference(input.data[0], result);
+}
+
+ScalarFunction StAswkbFun::GetFunction() {
+	ScalarFunction function({LogicalType::GEOMETRY()}, LogicalType::BLOB, ToWKBFunction);
+	return function;
+}
+
+static void ToWKTFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	auto &heap = StringVector::GetStringHeap(result);
+	UnaryExecutor::Execute<string_t, string_t>(input.data[0], result,
+	                                           [&](const string_t &geom) { return Geometry::ToString(heap, geom); });
+}
+
+ScalarFunction StAstextFun::GetFunction() {
+	ScalarFunction function({LogicalType::GEOMETRY()}, LogicalType::VARCHAR, ToWKTFunction);
+	return function;
+}
+
+static void IntersectsExtentFunction(DataChunk &input, ExpressionState &state, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, bool>(
+	    input.data[0], input.data[1], result, [](const string_t &lhs_geom, const string_t &rhs_geom) {
+		    auto lhs_extent = GeometryExtent::Empty();
+		    auto rhs_extent = GeometryExtent::Empty();
+
+		    const auto lhs_is_empty = Geometry::GetExtent(lhs_geom, lhs_extent) == 0;
+		    const auto rhs_is_empty = Geometry::GetExtent(rhs_geom, rhs_extent) == 0;
+
+		    if (lhs_is_empty || rhs_is_empty) {
+			    // One of the geometries is empty
+			    return false;
+		    }
+
+		    // Don't take Z and M into account for intersection test
+		    return lhs_extent.IntersectsXY(rhs_extent);
+	    });
+}
+
+ScalarFunction StIntersectsExtentFun::GetFunction() {
+	ScalarFunction function({LogicalType::GEOMETRY(), LogicalType::GEOMETRY()}, LogicalType::BOOLEAN,
+	                        IntersectsExtentFunction);
+	return function;
+}
+
+static Value GetCRSValue(const LogicalType &logical_type) {
+	if (!GeoType::HasCRS(logical_type)) {
+		// Return null
+		return Value(LogicalTypeId::VARCHAR);
+	}
+	auto &crs = GeoType::GetCRS(logical_type);
+	return Value(crs.GetDefinition());
+}
+
+static void CRSFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &type = args.data[0].GetType();
+	result.Reference(GetCRSValue(type), count_t(args.size()));
+}
+
+static unique_ptr<Expression> BindCRSFunctionExpression(FunctionBindExpressionInput &input) {
+	const auto &return_type = input.children[0]->GetReturnType();
+	if (return_type.id() != LogicalTypeId::GEOMETRY) {
+		// parameter - unknown return type
+		return nullptr;
+	}
+
+	return make_uniq<BoundConstantExpression>(GetCRSValue(return_type));
+}
+
+static unique_ptr<FunctionData> BindCRSFunction(BindScalarFunctionInput &input) {
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+
+	if (arguments[0]->GetReturnType().id() != LogicalTypeId::GEOMETRY) {
+		return nullptr;
+	}
+
+	// Propagate the CRS from the input argument to the parameter type
+	bound_function.GetArguments()[0] = arguments[0]->GetReturnType();
+	return nullptr;
+}
+
+ScalarFunction StCrsFun::GetFunction() {
+	ScalarFunction geom_func({LogicalType::GEOMETRY()}, LogicalType::VARCHAR, CRSFunction, BindCRSFunction);
+	geom_func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	geom_func.SetBindExpressionCallback(BindCRSFunctionExpression);
+	return geom_func;
+}
+
+static unique_ptr<FunctionData> SetCRSBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+
+	// Check if the CRS is set in the second argument
+	if (arguments[1]->HasParameter()) {
+		throw ParameterNotResolvedException();
+	}
+	if (!arguments[1]->IsFoldable()) {
+		throw BinderException("ST_SetCRS: CRS argument must be constant!");
+	}
+	const auto crs_val = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
+	if (!crs_val.IsNull()) {
+		const auto &crs_str = StringValue::Get(crs_val);
+
+		// Try to convert to identify
+		const auto lookup = CoordinateReferenceSystem::TryIdentify(context, crs_str);
+		if (lookup) {
+			bound_function.SetReturnType(LogicalType::GEOMETRY(lookup->GetDefinition()));
+		} else {
+			// Pass on the raw string (better than nothing)
+			bound_function.SetReturnType(LogicalType::GEOMETRY(crs_str));
+		}
+	}
+
+	// Erase the CRS argument expression
+	return nullptr;
+}
+
+static void SetCRSFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	result.Reinterpret(args.data[0]);
+}
+
+ScalarFunction StSetcrsFun::GetFunction() {
+	ScalarFunction geom_func({LogicalType::GEOMETRY(), LogicalType::VARCHAR}, LogicalType::GEOMETRY(), SetCRSFunction,
+	                         SetCRSBind);
+	return geom_func;
+}
+
+} // namespace duckdb

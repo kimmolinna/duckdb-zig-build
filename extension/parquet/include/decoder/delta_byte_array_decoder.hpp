@@ -8,12 +8,19 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include "duckdb.hpp"
 #include "parquet_dbp_decoder.hpp"
 #include "resizable_buffer.hpp"
+#include "duckdb/common/shared_ptr_ipp.hpp"
+#include "duckdb/common/typedefs.hpp"
 
 namespace duckdb {
 class ColumnReader;
+class Allocator;
+class ResizeableBuffer;
+class Vector;
 
 class DeltaByteArrayDecoder {
 public:
@@ -30,9 +37,9 @@ public:
 
 private:
 	ColumnReader &reader;
-	unique_ptr<Vector> byte_array_data;
-	idx_t byte_array_count = 0;
-	idx_t delta_offset = 0;
+
+	//! Decoded data in plain Parquet page format
+	shared_ptr<ResizeableBuffer> plain_data;
 };
 
 } // namespace duckdb

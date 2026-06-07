@@ -2,13 +2,8 @@
 # description: Test NULL versions
 # group: [transactions]
 
-require skip_reload
-
 statement ok
 SET immediate_transaction_mode=true
-
-statement ok
-PRAGMA enable_verification
 
 statement ok con1
 CREATE TABLE integers(i INTEGER, j INTEGER)

@@ -2,9 +2,6 @@
 # description: Test circular dependency detection
 # group: [virtual]
 
-statement ok
-PRAGMA enable_verification
-
 statement error
 CREATE TABLE tbl (
 	gcol1 AS (gcol10),
@@ -20,6 +17,7 @@ CREATE TABLE tbl (
 	x INTEGER
 );
 ----
+<REGEX>:.*Invalid Input Error.*Circular dependency.*
 
 statement ok
 CREATE TABLE tbl (
@@ -52,3 +50,4 @@ CREATE TABLE circular (
 	x INTEGER,
 );
 ----
+<REGEX>:.*Invalid Input Error.*Circular dependency.*

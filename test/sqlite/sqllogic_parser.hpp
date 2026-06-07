@@ -11,6 +11,7 @@
 #include "duckdb.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/exception_format_value.hpp"
+#include "sqllogic_command.hpp"
 
 namespace duckdb {
 
@@ -24,6 +25,7 @@ enum class SQLLogicTokenType {
 	SQLLOGIC_HALT,
 	SQLLOGIC_MODE,
 	SQLLOGIC_SET,
+	SQLLOGIC_RESET,
 	SQLLOGIC_LOOP,
 	SQLLOGIC_FOREACH,
 	SQLLOGIC_CONCURRENT_LOOP,
@@ -31,11 +33,15 @@ enum class SQLLogicTokenType {
 	SQLLOGIC_ENDLOOP,
 	SQLLOGIC_REQUIRE,
 	SQLLOGIC_REQUIRE_ENV,
+	SQLLOGIC_TEST_ENV,
 	SQLLOGIC_LOAD,
 	SQLLOGIC_RESTART,
 	SQLLOGIC_RECONNECT,
 	SQLLOGIC_SLEEP,
-	SQLLOGIC_UNZIP
+	SQLLOGIC_UNZIP,
+	SQLLOGIC_TAGS,
+	SQLLOGIC_CONTINUE,
+	SQLLOGIC_INCLUDE
 };
 
 class SQLLogicToken {
@@ -55,16 +61,21 @@ public:
 	bool print_input = false;
 	//! Whether or not we have seen a statement
 	bool seen_statement = false;
+	//! Include files
+	unique_ptr<SQLLogicParser> current_include;
 
 public:
 	static bool EmptyOrComment(const string &line);
 	static bool IsSingleLineStatement(SQLLogicToken &token);
+	static bool IsTestCommand(SQLLogicTokenType &type);
 
 	//! Does the next line contain a comment, empty line, or is the end of the file
 	bool NextLineEmptyOrComment();
 
 	//! Opens the file, returns whether or not reading was successful
 	bool OpenFile(const string &path);
+
+	void IncludeFile(const string &file_name);
 
 	//! Moves the current line to the beginning of the next statement
 	//! Returns false if there is no next statement (i.e. we reached the end of the file)
@@ -82,7 +93,7 @@ public:
 	vector<string> ExtractExpectedResult();
 
 	//! Extract the expected error (in case of statement error)
-	string ExtractExpectedError(bool expect_ok, bool original_sqlite_test);
+	string ExtractExpectedError(ExpectedResult expected_result, bool original_sqlite_test);
 
 	//! Tokenize the current line
 	SQLLogicToken Tokenize();

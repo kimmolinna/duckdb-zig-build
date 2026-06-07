@@ -1,5 +1,5 @@
 #include "duckdb/execution/operator/csv_scanner/scanner_boundary.hpp"
-
+#include "duckdb/common/printer.hpp"
 namespace duckdb {
 
 CSVPosition::CSVPosition(idx_t buffer_idx_p, idx_t buffer_pos_p) : buffer_idx(buffer_idx_p), buffer_pos(buffer_pos_p) {
@@ -13,23 +13,23 @@ CSVBoundary::CSVBoundary(idx_t buffer_idx_p, idx_t buffer_pos_p, idx_t boundary_
 CSVBoundary::CSVBoundary() : buffer_idx(0), buffer_pos(0), boundary_idx(0), end_pos(NumericLimits<idx_t>::Maximum()) {
 }
 
-CSVIterator::CSVIterator() : is_set(false) {
+CSVIterator::CSVIterator() : buffer_size(0), is_set(false) {
 }
 
 void CSVBoundary::Print() const {
 #ifndef DUCKDB_DISABLE_PRINT
-	std::cout << "---Boundary: " << boundary_idx << " ---" << '\n';
-	std::cout << "Buffer Index: " << buffer_idx << '\n';
-	std::cout << "Buffer Pos: " << buffer_pos << '\n';
-	std::cout << "End Pos: " << end_pos << '\n';
-	std::cout << "------------" << end_pos << '\n';
+	Printer::PrintF("---Boundary: %d\n", boundary_idx);
+	Printer::PrintF("Buffer Index: %d\n", buffer_idx);
+	Printer::PrintF("Buffer Pos: %d\n", buffer_pos);
+	Printer::PrintF("End Pos: %d\n", end_pos);
+	Printer::PrintF("------------\n", end_pos);
 #endif
 }
 
 void CSVIterator::Print() const {
 #ifndef DUCKDB_DISABLE_PRINT
 	boundary.Print();
-	std::cout << "Is set: " << is_set << '\n';
+	Printer::PrintF("Is set: %s\n", is_set ? "true" : "false");
 #endif
 }
 
@@ -40,6 +40,11 @@ idx_t CSVIterator::BytesPerThread(const CSVReaderOptions &reader_options) {
 	if (bytes_per_thread < max_row_size) {
 		// If we are setting up the buffer size directly, we must make sure each thread will read the full buffer.
 		return max_row_size;
+	}
+	if (bytes_per_thread == 0) {
+		// Bytes per thread can never be zero, but it might happen if max_row_size = 0
+		// Not sure why a human being would do that...
+		return 1;
 	}
 	return bytes_per_thread;
 }

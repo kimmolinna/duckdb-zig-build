@@ -1,4 +1,3 @@
-#define DUCKDB_EXTENSION_MAIN
 #include "duckdb.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
@@ -137,7 +136,7 @@ public:
 		}
 
 		auto types = chunk_collection->Types();
-		plan = make_uniq<LogicalColumnDataGet>(0, types, std::move(chunk_collection));
+		plan = make_uniq<LogicalColumnDataGet>(TableIndex(0), types, std::move(chunk_collection));
 
 		len = 0;
 		(void)len;
@@ -151,17 +150,15 @@ public:
 // Extension load + setup
 //===--------------------------------------------------------------------===//
 extern "C" {
-DUCKDB_EXTENSION_API void loadable_extension_optimizer_demo_init(duckdb::DatabaseInstance &db) {
+
+DUCKDB_CPP_EXTENSION_ENTRY(loadable_extension_optimizer_demo, loader) {
+	auto &db = loader.GetDatabaseInstance();
 	Connection con(db);
 
 	// add a parser extension
 	auto &config = DBConfig::GetConfig(db);
-	config.optimizer_extensions.push_back(WaggleExtension());
+	OptimizerExtension::Register(config, WaggleExtension());
 	config.AddExtensionOption("waggle_location_host", "host for remote callback", LogicalType::VARCHAR);
 	config.AddExtensionOption("waggle_location_port", "port for remote callback", LogicalType::INTEGER);
-}
-
-DUCKDB_EXTENSION_API const char *loadable_extension_optimizer_demo_version() {
-	return DuckDB::LibraryVersion();
 }
 }

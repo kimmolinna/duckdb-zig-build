@@ -8,41 +8,33 @@
 
 #pragma once
 
+#include "duckdb/planner/operator/logical_cte.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/binder.hpp"
 
 namespace duckdb {
 
-class LogicalRecursiveCTE : public LogicalOperator {
-	LogicalRecursiveCTE() : LogicalOperator(LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
-	}
+class LogicalRecursiveCTE : public LogicalCTE {
+	LogicalRecursiveCTE();
 
 public:
 	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_RECURSIVE_CTE;
 
 public:
-	LogicalRecursiveCTE(string ctename_p, idx_t table_index, idx_t column_count, bool union_all,
+	LogicalRecursiveCTE(string ctename_p, TableIndex table_index, idx_t column_count, bool union_all,
 	                    vector<unique_ptr<Expression>> key_targets, unique_ptr<LogicalOperator> top,
-	                    unique_ptr<LogicalOperator> bottom)
-	    : LogicalOperator(LogicalOperatorType::LOGICAL_RECURSIVE_CTE), union_all(union_all),
-	      ctename(std::move(ctename_p)), table_index(table_index), column_count(column_count),
-	      key_targets(std::move(key_targets)) {
-
-		children.push_back(std::move(top));
-		children.push_back(std::move(bottom));
-	}
+	                    unique_ptr<LogicalOperator> bottom);
 
 	bool union_all;
 	// Flag if recurring table is referenced, if not we do not copy ht into ColumnDataCollection
 	bool ref_recurring;
-	string ctename;
-	idx_t table_index;
-	idx_t column_count;
-
 	vector<unique_ptr<Expression>> key_targets;
-	vector<CorrelatedColumnInfo> correlated_columns;
+	vector<unique_ptr<Expression>> payload_aggregates;
+	vector<LogicalType> internal_types;
 
 public:
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
+
 	vector<ColumnBinding> GetColumnBindings() override {
 		return GenerateColumnBindings(table_index, column_count);
 	}
@@ -50,12 +42,10 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
 
-	vector<idx_t> GetTableIndex() const override;
+	vector<TableIndex> GetTableIndex() const override;
 	string GetName() const override;
 
 protected:
-	void ResolveTypes() override {
-		types = children[0]->types;
-	}
+	void ResolveTypes() override;
 };
 } // namespace duckdb

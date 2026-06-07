@@ -3,10 +3,34 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/enum_util.hpp"
-#include "duckdb/common/multi_file_reader.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/set.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 
 namespace duckdb {
+
+namespace {
+
+void VerifyTypeListsMatch(const vector<LogicalType> &columns_types, const vector<LogicalType> &override_types) {
+	if (columns_types.size() != override_types.size()) {
+		throw BinderException(
+		    "read_csv: the 'columns' option specifies %d column(s), but 'types'/'dtypes'/'column_types' "
+		    "specifies %d type(s). When both are provided they must agree. "
+		    "Consider removing the 'type' option.",
+		    columns_types.size(), override_types.size());
+	}
+	for (idx_t i = 0; i < override_types.size(); i++) {
+		if (columns_types[i] != override_types[i]) {
+			throw BinderException(
+			    "read_csv: column type mismatch at position %d: 'columns' specifies '%s' but "
+			    "'types'/'dtypes'/'column_types' specifies '%s'. When both are provided they must agree. "
+			    "Consider removing the 'type' option.",
+			    i + 1, columns_types[i].ToString(), override_types[i].ToString());
+		}
+	}
+}
+
+} // namespace
 
 CSVReaderOptions::CSVReaderOptions(const CSVOption<char> single_byte_delimiter,
                                    const CSVOption<string> &multi_byte_delimiter) {
@@ -125,8 +149,9 @@ void CSVReaderOptions::SetDelimiter(const string &input) {
 	if (delim_str.size() > 4) {
 		throw InvalidInputException("The delimiter option cannot exceed a size of 4 bytes.");
 	}
-	if (input.empty()) {
-		delim_str = string("\0", 1);
+	if (this->dialect_options.state_machine_options.delimiter.IsSetByUser()) {
+		// we can't know in which order delim and sep were specified, so we throw an exception here
+		throw BinderException("CSV Reader function option delim and sep are aliases, only one can be supplied");
 	}
 	this->dialect_options.state_machine_options.delimiter.Set(delim_str);
 }
@@ -296,7 +321,7 @@ void CSVReaderOptions::SetReadOption(const string &loption, const Value &value, 
 			force_not_null = ParseColumnList(value, expected_names, loption);
 		} else {
 			if (value.IsNull()) {
-				throw BinderException("Invalid value for 'force_not_null' paramenter");
+				throw BinderException("Invalid value for 'force_not_null' parameter");
 			}
 			// Get the list of columns to use as a recovery key
 			auto &children = ListValue::GetChildren(value);
@@ -332,8 +357,24 @@ void CSVReaderOptions::SetReadOption(const string &loption, const Value &value, 
 			throw BinderException("Unsupported parameter for REJECTS_LIMIT: cannot be negative");
 		}
 		rejects_limit = NumericCast<idx_t>(limit);
+	} else if (loption == "rejects_line_size_limit") {
+		auto limit = ParseInteger(value, loption);
+		if (limit < 0) {
+			throw BinderException("Unsupported parameter for REJECTS_LINE_SIZE_LIMIT: cannot be negative");
+		}
+		rejects_line_size_limit = NumericCast<idx_t>(limit);
 	} else if (loption == "encoding") {
 		encoding = ParseString(value, loption);
+	} else if (loption == "thousands") {
+		if (!value.IsNull()) {
+			auto thousands_separator_string = ParseString(value, loption);
+			if (thousands_separator_string.size() > 1) {
+				throw BinderException("Unsupported parameter for THOUSANDS: should be max one character");
+			}
+			if (!thousands_separator_string.empty()) {
+				thousands_separator = thousands_separator_string[0];
+			}
+		}
 	} else {
 		throw BinderException("Unrecognized option for CSV reader \"%s\"", loption);
 	}
@@ -454,7 +495,7 @@ bool CSVReaderOptions::WasTypeManuallySet(idx_t i) const {
 	return was_type_manually_set[i];
 }
 
-string CSVReaderOptions::ToString(const string &current_file_path) const {
+string CSVReaderOptions::ToString(const String &current_file_path) const {
 	auto &delimiter = dialect_options.state_machine_options.delimiter;
 	auto &quote = dialect_options.state_machine_options.quote;
 	auto &escape = dialect_options.state_machine_options.escape;
@@ -464,7 +505,7 @@ string CSVReaderOptions::ToString(const string &current_file_path) const {
 	auto &skip_rows = dialect_options.skip_rows;
 
 	auto &header = dialect_options.header;
-	string error = "  file = " + current_file_path + "\n  ";
+	string error = "  file = " + current_file_path.ToStdString() + "\n  ";
 	// Let's first print options that can either be set by the user or by the sniffer
 	// delimiter
 	error += FormatOptionLine("delimiter", delimiter);
@@ -514,13 +555,14 @@ static Value StringVectorToValue(const vector<string> &vec) {
 static uint8_t GetCandidateSpecificity(const LogicalType &candidate_type) {
 	//! Const ht with accepted auto_types and their weights in specificity
 	const duckdb::unordered_map<uint8_t, uint8_t> auto_type_candidates_specificity {
-	    {static_cast<uint8_t>(LogicalTypeId::VARCHAR), 0},      {static_cast<uint8_t>(LogicalTypeId::DOUBLE), 1},
-	    {static_cast<uint8_t>(LogicalTypeId::FLOAT), 2},        {static_cast<uint8_t>(LogicalTypeId::DECIMAL), 3},
-	    {static_cast<uint8_t>(LogicalTypeId::BIGINT), 4},       {static_cast<uint8_t>(LogicalTypeId::INTEGER), 5},
-	    {static_cast<uint8_t>(LogicalTypeId::SMALLINT), 6},     {static_cast<uint8_t>(LogicalTypeId::TINYINT), 7},
-	    {static_cast<uint8_t>(LogicalTypeId::TIMESTAMP_TZ), 8}, {static_cast<uint8_t>(LogicalTypeId::TIMESTAMP), 9},
-	    {static_cast<uint8_t>(LogicalTypeId::DATE), 10},        {static_cast<uint8_t>(LogicalTypeId::TIME), 11},
-	    {static_cast<uint8_t>(LogicalTypeId::BOOLEAN), 12},     {static_cast<uint8_t>(LogicalTypeId::SQLNULL), 13}};
+	    {static_cast<uint8_t>(LogicalTypeId::VARCHAR), 0},       {static_cast<uint8_t>(LogicalTypeId::DOUBLE), 1},
+	    {static_cast<uint8_t>(LogicalTypeId::FLOAT), 2},         {static_cast<uint8_t>(LogicalTypeId::DECIMAL), 3},
+	    {static_cast<uint8_t>(LogicalTypeId::BIGNUM), 4},        {static_cast<uint8_t>(LogicalTypeId::HUGEINT), 5},
+	    {static_cast<uint8_t>(LogicalTypeId::BIGINT), 6},        {static_cast<uint8_t>(LogicalTypeId::INTEGER), 7},
+	    {static_cast<uint8_t>(LogicalTypeId::SMALLINT), 8},      {static_cast<uint8_t>(LogicalTypeId::TINYINT), 9},
+	    {static_cast<uint8_t>(LogicalTypeId::TIMESTAMP_TZ), 10}, {static_cast<uint8_t>(LogicalTypeId::TIMESTAMP), 11},
+	    {static_cast<uint8_t>(LogicalTypeId::DATE), 12},         {static_cast<uint8_t>(LogicalTypeId::TIME), 13},
+	    {static_cast<uint8_t>(LogicalTypeId::BOOLEAN), 14},      {static_cast<uint8_t>(LogicalTypeId::SQLNULL), 15}};
 
 	auto id = static_cast<uint8_t>(candidate_type.id());
 	auto it = auto_type_candidates_specificity.find(id);
@@ -540,7 +582,7 @@ bool StoreUserDefinedParameter(const string &option) {
 	return true;
 }
 
-void CSVReaderOptions::Verify(MultiFileReaderOptions &file_options) {
+void CSVReaderOptions::Verify(MultiFileOptions &file_options) {
 	if (rejects_table_name.IsSetByUser() && !store_rejects.GetValue() && store_rejects.IsSetByUser()) {
 		throw BinderException("REJECTS_TABLE option is only supported when store_rejects is not manually set to false");
 	}
@@ -599,7 +641,7 @@ string CSVReaderOptions::GetUserDefinedParameters() const {
 }
 
 void CSVReaderOptions::FromNamedParameters(const named_parameter_map_t &in, ClientContext &context,
-                                           MultiFileReaderOptions &file_options) {
+                                           MultiFileOptions &file_options) {
 	for (auto &kv : in) {
 		auto loption = StringUtil::Lower(kv.first);
 		if (MultiFileReader().ParseOption(loption, kv.second, file_options, context)) {
@@ -626,19 +668,31 @@ void CSVReaderOptions::ParseOption(ClientContext &context, const string &key, co
 		}
 		auto &struct_children = StructValue::GetChildren(val);
 		D_ASSERT(StructType::GetChildCount(child_type) == struct_children.size());
+
+		// Parse into temporary lists first
+		vector<string> parsed_names;
+		vector<LogicalType> parsed_types;
+		case_insensitive_map_t<idx_t> parsed_types_per_column;
 		for (idx_t i = 0; i < struct_children.size(); i++) {
 			auto &name = StructType::GetChildName(child_type, i);
 			auto &val = struct_children[i];
-			name_list.push_back(name);
+			parsed_names.push_back(name);
 			if (val.type().id() != LogicalTypeId::VARCHAR) {
 				throw BinderException("read_csv requires a type specification as string");
 			}
-			sql_types_per_column[name] = i;
-			sql_type_list.emplace_back(TransformStringToLogicalType(StringValue::Get(val), context));
+			parsed_types_per_column[name] = i;
+			parsed_types.emplace_back(TransformStringToLogicalType(StringValue::Get(val), context));
 		}
-		if (name_list.empty()) {
+		if (parsed_names.empty()) {
 			throw BinderException("read_csv requires at least a single column as input!");
 		}
+		// If types were already set by 'types'/'dtypes'/'column_types', verify they match
+		if (!sql_type_list.empty()) {
+			VerifyTypeListsMatch(parsed_types, sql_type_list);
+		}
+		name_list = std::move(parsed_names);
+		sql_type_list = std::move(parsed_types);
+		sql_types_per_column = std::move(parsed_types_per_column);
 	} else if (loption == "auto_type_candidates") {
 		auto_type_candidates.clear();
 		map<uint8_t, LogicalType> candidate_types;
@@ -701,10 +755,13 @@ void CSVReaderOptions::ParseOption(ClientContext &context, const string &key, co
 		if (child_type.id() != LogicalTypeId::STRUCT && child_type.id() != LogicalTypeId::LIST) {
 			throw BinderException("read_csv %s requires a struct or list as input", key);
 		}
-		if (!sql_type_list.empty()) {
+		if (!columns_set && !sql_type_list.empty()) {
 			throw BinderException("read_csv column_types/types/dtypes can only be supplied once");
 		}
+
+		// Parse into temporary lists first
 		vector<string> sql_type_names;
+		case_insensitive_map_t<idx_t> parsed_types_per_column;
 		if (child_type.id() == LogicalTypeId::STRUCT) {
 			auto &struct_children = StructValue::GetChildren(val);
 			D_ASSERT(StructType::GetChildCount(child_type) == struct_children.size());
@@ -715,7 +772,7 @@ void CSVReaderOptions::ParseOption(ClientContext &context, const string &key, co
 					throw BinderException("read_csv %s requires a type specification as string", key);
 				}
 				sql_type_names.push_back(StringValue::Get(val));
-				sql_types_per_column[name] = i;
+				parsed_types_per_column[name] = i;
 			}
 		} else {
 			auto &list_child = ListType::GetChildType(child_type);
@@ -727,16 +784,33 @@ void CSVReaderOptions::ParseOption(ClientContext &context, const string &key, co
 				sql_type_names.push_back(StringValue::Get(child));
 			}
 		}
-		sql_type_list.reserve(sql_type_names.size());
+		vector<LogicalType> parsed_types;
+		parsed_types.reserve(sql_type_names.size());
 		for (auto &sql_type : sql_type_names) {
 			auto def_type = TransformStringToLogicalType(sql_type, context);
-			if (def_type.id() == LogicalTypeId::USER) {
+			if (def_type.id() == LogicalTypeId::UNBOUND) {
 				throw BinderException("Unrecognized type \"%s\" for read_csv %s definition", sql_type, key);
 			}
-			sql_type_list.push_back(std::move(def_type));
+			parsed_types.push_back(std::move(def_type));
+		}
+
+		// If columns already set sql_type_list, verify they match but keep columns' mappings
+		if (columns_set && !sql_type_list.empty()) {
+			VerifyTypeListsMatch(sql_type_list, parsed_types);
+		} else {
+			sql_type_list = std::move(parsed_types);
+			if (!parsed_types_per_column.empty()) {
+				sql_types_per_column = std::move(parsed_types_per_column);
+			}
 		}
 	} else if (loption == "all_varchar") {
 		all_varchar = GetBooleanValue(loption, val);
+	} else if (loption == "files_to_sniff") {
+		files_to_sniff = ParseInteger(val, loption);
+		if (files_to_sniff < 1 && files_to_sniff != -1) {
+			throw BinderException(
+			    "Unsupported parameter for files_to_sniff: value must be -1 for all files or higher than one.");
+		}
 	} else if (loption == "normalize_names") {
 		normalize_names = GetBooleanValue(loption, val);
 	} else {

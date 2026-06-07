@@ -2,9 +2,6 @@
 # description: Test array_to_string function
 # group: [list]
 
-statement ok
-PRAGMA enable_verification
-
 query I
 SELECT array_to_string([1,2,3], '')
 ----
@@ -29,7 +26,7 @@ SELECT array_to_string([1, 2, 3], NULL)
 query I
 SELECT array_to_string([], '-')
 ----
-NULL
+(empty)
 
 query I
 SELECT array_to_string([i, i + 1], '-') FROM range(6) t(i) WHERE i<=2 OR i>4

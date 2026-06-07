@@ -57,6 +57,8 @@ string ExpressionTypeToString(ExpressionType type) {
 		return "AGGREGATE";
 	case ExpressionType::WINDOW_AGGREGATE:
 		return "WINDOW_AGGREGATE";
+	case ExpressionType::WINDOW_FUNCTION:
+		return "WINDOW_FUNCTION";
 	case ExpressionType::WINDOW_RANK:
 		return "RANK";
 	case ExpressionType::WINDOW_RANK_DENSE:
@@ -79,6 +81,8 @@ string ExpressionTypeToString(ExpressionType type) {
 		return "LAG";
 	case ExpressionType::WINDOW_NTILE:
 		return "NTILE";
+	case ExpressionType::WINDOW_FILL:
+		return "FILL";
 	case ExpressionType::FUNCTION:
 		return "FUNCTION";
 	case ExpressionType::CASE_EXPR:
@@ -145,6 +149,8 @@ string ExpressionTypeToString(ExpressionType type) {
 		return "LAMBDA";
 	case ExpressionType::ARROW:
 		return "ARROW";
+	case ExpressionType::TYPE:
+		return "TYPE";
 	case ExpressionType::BOUND_EXPANDED:
 		return "BOUND_EXPANDED";
 	case ExpressionType::INVALID:
@@ -194,6 +200,8 @@ string ExpressionClassToString(ExpressionClass type) {
 		return "POSITIONAL_REFERENCE";
 	case ExpressionClass::BETWEEN:
 		return "BETWEEN";
+	case ExpressionClass::TYPE:
+		return "TYPE";
 	case ExpressionClass::BOUND_AGGREGATE:
 		return "BOUND_AGGREGATE";
 	case ExpressionClass::BOUND_CASE:
@@ -202,8 +210,8 @@ string ExpressionClassToString(ExpressionClass type) {
 		return "BOUND_CAST";
 	case ExpressionClass::BOUND_COLUMN_REF:
 		return "BOUND_COLUMN_REF";
-	case ExpressionClass::BOUND_COMPARISON:
-		return "BOUND_COMPARISON";
+	case ExpressionClass::LEGACY_BOUND_COMPARISON:
+		return "LEGACY_BOUND_COMPARISON";
 	case ExpressionClass::BOUND_CONJUNCTION:
 		return "BOUND_CONJUNCTION";
 	case ExpressionClass::BOUND_CONSTANT:
@@ -222,8 +230,8 @@ string ExpressionClassToString(ExpressionClass type) {
 		return "BOUND_SUBQUERY";
 	case ExpressionClass::BOUND_WINDOW:
 		return "BOUND_WINDOW";
-	case ExpressionClass::BOUND_BETWEEN:
-		return "BOUND_BETWEEN";
+	case ExpressionClass::LEGACY_BOUND_BETWEEN:
+		return "LEGACY_BOUND_BETWEEN";
 	case ExpressionClass::BOUND_UNNEST:
 		return "BOUND_UNNEST";
 	case ExpressionClass::BOUND_LAMBDA:
@@ -284,6 +292,12 @@ ExpressionType NegateComparisonExpression(ExpressionType type) {
 		break;
 	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
 		negated_type = ExpressionType::COMPARE_LESSTHAN;
+		break;
+	case ExpressionType::COMPARE_DISTINCT_FROM:
+		negated_type = ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+		break;
+	case ExpressionType::COMPARE_NOT_DISTINCT_FROM:
+		negated_type = ExpressionType::COMPARE_DISTINCT_FROM;
 		break;
 	default:
 		throw InternalException("Unsupported comparison type in negation");

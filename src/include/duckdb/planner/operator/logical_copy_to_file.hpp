@@ -14,6 +14,8 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/common/enums/preserve_order.hpp"
+#include "duckdb/planner/bound_result_modifier.hpp"
 
 namespace duckdb {
 
@@ -26,6 +28,8 @@ public:
 	    : LogicalOperator(LogicalOperatorType::LOGICAL_COPY_TO_FILE), function(std::move(function)),
 	      bind_data(std::move(bind_data)), copy_info(std::move(copy_info)) {
 	}
+
+public:
 	CopyFunction function;
 	unique_ptr<FunctionData> bind_data;
 	unique_ptr<CopyInfo> copy_info;
@@ -36,13 +40,21 @@ public:
 	string file_extension;
 	CopyOverwriteMode overwrite_mode;
 	bool per_thread_output;
+	optional_idx batch_size;
+	optional_idx batch_size_bytes;
+	optional_idx batches_per_file;
 	optional_idx file_size_bytes;
 	bool rotate;
 	CopyFunctionReturnType return_type;
 
 	bool partition_output;
 	bool write_partition_columns;
+	bool write_empty_file = true;
+	bool hive_file_pattern = true;
+	PreserveOrderType preserve_order = PreserveOrderType::AUTOMATIC;
 	vector<idx_t> partition_columns;
+	vector<BoundOrderByNode> order_columns;
+
 	vector<string> names;
 	vector<LogicalType> expected_types;
 

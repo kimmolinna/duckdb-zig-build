@@ -11,7 +11,6 @@
 #include "duckdb/planner/bound_query_node.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/parser/expression_map.hpp"
-#include "duckdb/planner/bound_tableref.hpp"
 #include "duckdb/parser/parsed_data/sample_options.hpp"
 #include "duckdb/parser/group_by_node.hpp"
 
@@ -25,6 +24,11 @@ struct SelectBindState {
 	//! The original unparsed expressions. This is exported after binding, because the binding might change the
 	//! expressions (e.g. when a * clause is present)
 	vector<unique_ptr<ParsedExpression>> original_expressions;
+	vector<unique_ptr<ParsedExpression>> unbound_groups;
+	parsed_expression_map_t<ProjectionIndex> group_map;
+	case_insensitive_map_t<ProjectionIndex> group_alias_map;
+	unordered_map<ProjectionIndex, ProjectionIndex> collated_groups;
+	unordered_set<idx_t> used_group_aliases;
 
 public:
 	unique_ptr<ParsedExpression> BindAlias(idx_t index);
@@ -36,7 +40,7 @@ public:
 
 	void AddExpandedColumn(idx_t expand_count);
 	void AddRegularColumn();
-	idx_t GetFinalIndex(idx_t index) const;
+	ProjectionIndex GetFinalIndex(idx_t index) const;
 
 private:
 	//! The set of referenced aliases
@@ -46,7 +50,7 @@ private:
 	//! The set of expressions that contains a subquery
 	unordered_set<idx_t> subquery_expressions;
 	//! Column indices after expansion of Expanded expressions (e.g. UNNEST(STRUCT) clauses)
-	vector<idx_t> expanded_column_indices;
+	vector<ProjectionIndex> expanded_column_indices;
 };
 
 } // namespace duckdb

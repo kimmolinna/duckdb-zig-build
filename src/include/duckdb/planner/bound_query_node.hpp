@@ -17,13 +17,8 @@ namespace duckdb {
 //! Bound equivalent of QueryNode
 class BoundQueryNode {
 public:
-	explicit BoundQueryNode(QueryNodeType type) : type(type) {
-	}
-	virtual ~BoundQueryNode() {
-	}
+	virtual ~BoundQueryNode() = default;
 
-	//! The type of the query node, either SetOperation or Select
-	QueryNodeType type;
 	//! The result modifiers that should be applied to this query node
 	vector<unique_ptr<BoundResultModifier>> modifiers;
 
@@ -33,24 +28,7 @@ public:
 	vector<LogicalType> types;
 
 public:
-	virtual idx_t GetRootIndex() = 0;
-
-public:
-	template <class TARGET>
-	TARGET &Cast() {
-		if (type != TARGET::TYPE) {
-			throw InternalException("Failed to cast bound query node to type - query node type mismatch");
-		}
-		return reinterpret_cast<TARGET &>(*this);
-	}
-
-	template <class TARGET>
-	const TARGET &Cast() const {
-		if (type != TARGET::TYPE) {
-			throw InternalException("Failed to cast bound query node to type - query node type mismatch");
-		}
-		return reinterpret_cast<const TARGET &>(*this);
-	}
+	virtual TableIndex GetRootIndex() = 0;
 };
 
 } // namespace duckdb

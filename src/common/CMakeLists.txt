@@ -2,10 +2,12 @@ if(NOT CLANG_TIDY)
   add_subdirectory(adbc)
 endif()
 
+add_subdirectory(allocator)
 add_subdirectory(arrow)
 add_subdirectory(crypto)
 add_subdirectory(enums)
 add_subdirectory(exception)
+add_subdirectory(multi_file)
 add_subdirectory(operator)
 add_subdirectory(progress_bar)
 add_subdirectory(tree_renderer)
@@ -13,7 +15,9 @@ add_subdirectory(row_operations)
 add_subdirectory(serializer)
 add_subdirectory(sort)
 add_subdirectory(types)
+add_subdirectory(util)
 add_subdirectory(value_operations)
+add_subdirectory(vector)
 add_subdirectory(vector_operations)
 
 if(${EXIT_TIME_DESTRUCTORS_WARNING})
@@ -28,29 +32,36 @@ endif()
 add_library_unity(
   duckdb_common
   OBJECT
-  allocator.cpp
   assert.cpp
   bind_helpers.cpp
   box_renderer.cpp
+  box_renderer_context.cpp
+  client_box_renderer_context.cpp
+  column_data_collection_render_interface.cpp
   cgroups.cpp
+  column_index.cpp
+  csv_writer.cpp
+  complex_json.cpp
   compressed_file_system.cpp
   constants.cpp
   checksum.cpp
+  encryption_functions.cpp
+  encryption_key_manager.cpp
   encryption_state.cpp
+  encryption_types.cpp
   exception.cpp
   exception_format_value.cpp
   extra_type_info.cpp
   file_buffer.cpp
   file_system.cpp
   filename_pattern.cpp
+  path.cpp
   fsst.cpp
   gzip_file_system.cpp
   hive_partitioning.cpp
-  http_util.cpp
   pipe_file_system.cpp
   local_file_system.cpp
-  multi_file_list.cpp
-  multi_file_reader.cpp
+  memory_mapped_file.cpp
   error_data.cpp
   opener_file_system.cpp
   printer.cpp
@@ -60,10 +71,14 @@ add_library_unity(
   stacktrace.cpp
   string_util.cpp
   enum_util.cpp
+  storage_compatibility.cpp
   symbols.cpp
   render_tree.cpp
+  thread_util.cpp
   tree_renderer.cpp
   types.cpp
+  bignum.cpp
+  clustered_aggregate.cpp
   virtual_file_system.cpp
   windows_util.cpp)
 set(ALL_OBJECT_FILES

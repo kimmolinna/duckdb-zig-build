@@ -68,7 +68,7 @@ bool Expression::PropagatesNullValues() const {
 	if (type == ExpressionType::OPERATOR_IS_NULL || type == ExpressionType::OPERATOR_IS_NOT_NULL ||
 	    type == ExpressionType::COMPARE_NOT_DISTINCT_FROM || type == ExpressionType::COMPARE_DISTINCT_FROM ||
 	    type == ExpressionType::CONJUNCTION_OR || type == ExpressionType::CONJUNCTION_AND ||
-	    type == ExpressionType::OPERATOR_COALESCE) {
+	    type == ExpressionType::OPERATOR_COALESCE || type == ExpressionType::CASE_EXPR) {
 		return false;
 	}
 	bool propagate_null_values = true;
@@ -123,6 +123,10 @@ bool Expression::Equals(const unique_ptr<Expression> &left, const unique_ptr<Exp
 
 bool Expression::ListEquals(const vector<unique_ptr<Expression>> &left, const vector<unique_ptr<Expression>> &right) {
 	return ExpressionUtil::ListEquals(left, right);
+}
+
+void Expression::SetVerificationStats(unique_ptr<BaseStatistics> stats) {
+	verification_stats = std::move(stats);
 }
 
 } // namespace duckdb

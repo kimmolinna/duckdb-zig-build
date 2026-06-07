@@ -10,20 +10,17 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/execution/operator/csv_scanner/string_value_scanner.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
-
+#include "test_config.hpp"
 #include "pid.hpp"
 #include "duckdb/function/table/read_csv.hpp"
+#include "duckdb/storage/storage_info.hpp"
 #include <cmath>
 #include <fstream>
-
-using namespace std;
 
 #define TESTING_DIRECTORY_NAME "duckdb_unittest_tempdir"
 
 namespace duckdb {
 static string custom_test_directory;
-static int debug_initialize_value = -1;
-static bool single_threaded = false;
 static case_insensitive_set_t required_requires;
 static bool delete_test_path = true;
 
@@ -51,9 +48,7 @@ void TestDeleteDirectory(string path) {
 void TestDeleteFile(string path) {
 	duckdb::unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
 	try {
-		if (fs->FileExists(path)) {
-			fs->RemoveFile(path);
-		}
+		fs->TryRemoveFile(path);
 	} catch (...) {
 	}
 }
@@ -80,16 +75,13 @@ void TestCreateDirectory(string path) {
 	fs->CreateDirectory(path);
 }
 
+string TestJoinPath(string path1, string path2) {
+	duckdb::unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
+	return fs->JoinPath(path1, path2);
+}
+
 void SetTestDirectory(string path) {
 	custom_test_directory = path;
-}
-
-void SetDebugInitialize(int value) {
-	debug_initialize_value = value;
-}
-
-void SetSingleThreaded() {
-	single_threaded = true;
 }
 
 void AddRequire(string require) {
@@ -157,8 +149,7 @@ void ClearTestDirectory() {
 }
 
 string TestCreatePath(string suffix) {
-	duckdb::unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
-	return fs->JoinPath(TestDirectoryPath(), suffix);
+	return TestJoinPath(TestDirectoryPath(), suffix);
 }
 
 bool TestIsInternalError(unordered_set<string> &internal_error_messages, const string &error) {
@@ -171,9 +162,12 @@ bool TestIsInternalError(unordered_set<string> &internal_error_messages, const s
 }
 
 unique_ptr<DBConfig> GetTestConfig() {
+	auto &test_config = TestConfiguration::Get();
+
 	auto result = make_uniq<DBConfig>();
 #ifndef DUCKDB_ALTERNATIVE_VERIFY
-	result->options.checkpoint_wal_size = 0;
+	result->options.checkpoint_wal_size = test_config.GetCheckpointWALSize();
+	result->options.checkpoint_on_shutdown = test_config.GetCheckpointOnShutdown();
 #else
 	result->options.checkpoint_on_shutdown = false;
 #endif
@@ -183,46 +177,26 @@ unique_ptr<DBConfig> GetTestConfig() {
 	// and when it's not, so we enable only when DUCKDB_RUN_SLOW_VERIFIERS is set.
 	result->options.trim_free_blocks = true;
 #endif
-	result->options.allow_unsigned_extensions = true;
-	if (single_threaded) {
-		result->options.maximum_threads = 1;
+	result->SetOptionByName("allow_unsigned_extensions", true);
+	auto storage_version = test_config.GetStorageVersion();
+	if (!storage_version.empty()) {
+		result->options.storage_compatibility = StorageCompatibility::FromString(storage_version);
 	}
-	switch (debug_initialize_value) {
-	case -1:
-		break;
-	case 0:
-		result->options.debug_initialize = DebugInitialize::DEBUG_ZERO_INITIALIZE;
-		break;
-	case 0xFF:
-		result->options.debug_initialize = DebugInitialize::DEBUG_ONE_INITIALIZE;
-		break;
-	default:
-		fprintf(stderr, "Invalid value for debug_initialize_value\n");
-		exit(1);
+
+	auto max_threads = test_config.GetMaxThreads();
+	if (max_threads.IsValid()) {
+		result->options.maximum_threads = max_threads.GetIndex();
 	}
+
+	auto block_alloc_size = test_config.GetBlockAllocSize();
+	if (block_alloc_size.IsValid()) {
+		Storage::VerifyBlockAllocSize(block_alloc_size.GetIndex());
+		result->SetOptionByName("default_block_size", Value::UBIGINT(block_alloc_size.GetIndex()));
+	}
+
+	result->options.debug_initialize = test_config.GetDebugInitialize();
+	result->SetOptionByName("debug_verify_vector", EnumUtil::ToString(test_config.GetVectorVerification()));
 	return result;
-}
-
-string GetCSVPath() {
-	duckdb::unique_ptr<FileSystem> fs = FileSystem::CreateLocal();
-	string csv_path = TestCreatePath("csv_files");
-	if (fs->DirectoryExists(csv_path)) {
-		fs->RemoveDirectory(csv_path);
-	}
-	fs->CreateDirectory(csv_path);
-	return csv_path;
-}
-
-void WriteCSV(string path, const char *csv) {
-	ofstream csv_writer(path);
-	csv_writer << csv;
-	csv_writer.close();
-}
-
-void WriteBinary(string path, const uint8_t *data, uint64_t length) {
-	ofstream binary_writer(path, ios::binary);
-	binary_writer.write((const char *)data, length);
-	binary_writer.close();
 }
 
 bool CHECK_COLUMN(QueryResult &result_, size_t column_number, vector<duckdb::Value> values) {
@@ -359,7 +333,7 @@ bool compare_result(string csv, ColumnDataCollection &collection, vector<Logical
 
 	// create the csv on disk
 	auto csv_path = TestCreatePath("__test_csv_path.csv");
-	ofstream f(csv_path);
+	std::ofstream f(csv_path);
 	f << csv;
 	f.close();
 
@@ -378,7 +352,7 @@ bool compare_result(string csv, ColumnDataCollection &collection, vector<Logical
 
 	DuckDB db;
 	Connection con(db);
-	MultiFileReaderOptions file_options;
+	MultiFileOptions file_options;
 	auto scanner_ptr = StringValueScanner::GetCSVScanner(*con.context, options, file_options);
 	auto &scanner = *scanner_ptr;
 	ColumnDataCollection csv_data_collection(*con.context, sql_types);
@@ -402,4 +376,5 @@ bool compare_result(string csv, ColumnDataCollection &collection, vector<Logical
 	}
 	return true;
 }
+
 } // namespace duckdb

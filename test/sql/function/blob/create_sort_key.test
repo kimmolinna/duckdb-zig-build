@@ -2,9 +2,6 @@
 # description: Test create_sort_key function
 # group: [blob]
 
-statement ok
-PRAGMA enable_verification
-
 # test integer types with all modifiers
 statement ok
 CREATE TABLE integers(i INTEGER);
@@ -148,8 +145,8 @@ SELECT * FROM structs ORDER BY create_sort_key(s, 'ASC NULLS LAST')
 {'i': 42, 'v': hello}
 {'i': 42, 'v': hello\0}
 {'i': 42, 'v': NULL}
-{'i': 43, 'v': }
-{'i': NULL, 'v': }
+{'i': 43, 'v': ''}
+{'i': NULL, 'v': ''}
 NULL
 
 query II
@@ -166,8 +163,8 @@ query I
 SELECT * FROM structs ORDER BY create_sort_key(s, 'DESC NULLS FIRST')
 ----
 NULL
-{'i': NULL, 'v': }
-{'i': 43, 'v': }
+{'i': NULL, 'v': ''}
+{'i': 43, 'v': ''}
 {'i': 42, 'v': NULL}
 {'i': 42, 'v': hello\0}
 {'i': 42, 'v': hello}
@@ -204,12 +201,12 @@ SELECT * FROM list_of_structs ORDER BY create_sort_key(s, 'ASC NULLS LAST')
 ----
 []
 [{'i': 42, 'v': hello}]
-[{'i': 42, 'v': hello}, {'i': 84, 'v': }]
+[{'i': 42, 'v': hello}, {'i': 84, 'v': ''}]
 [{'i': 42, 'v': hello}, {'i': 84, 'v': \0}]
-[{'i': 42, 'v': hello}, NULL, {'i': 84, 'v': }]
+[{'i': 42, 'v': hello}, NULL, {'i': 84, 'v': ''}]
 [{'i': 42, 'v': NULL}]
-[{'i': 43, 'v': }]
-[{'i': NULL, 'v': }]
+[{'i': 43, 'v': ''}]
+[{'i': NULL, 'v': ''}]
 [NULL]
 NULL
 
@@ -218,12 +215,12 @@ SELECT * FROM list_of_structs ORDER BY create_sort_key(s, 'DESC NULLS FIRST')
 ----
 NULL
 [NULL]
-[{'i': NULL, 'v': }]
-[{'i': 43, 'v': }]
+[{'i': NULL, 'v': ''}]
+[{'i': 43, 'v': ''}]
 [{'i': 42, 'v': NULL}]
-[{'i': 42, 'v': hello}, NULL, {'i': 84, 'v': }]
+[{'i': 42, 'v': hello}, NULL, {'i': 84, 'v': ''}]
 [{'i': 42, 'v': hello}, {'i': 84, 'v': \0}]
-[{'i': 42, 'v': hello}, {'i': 84, 'v': }]
+[{'i': 42, 'v': hello}, {'i': 84, 'v': ''}]
 [{'i': 42, 'v': hello}]
 []
 

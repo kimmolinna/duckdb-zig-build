@@ -6,9 +6,6 @@ require json
 
 require notwindows
 
-statement ok
-PRAGMA enable_verification
-
 # list with varchar to json
 statement ok
 create table t2(blobs json[])
@@ -41,12 +38,12 @@ select cast(['[1, 2]', '[3, 4]'] as json[]);
 query I
 SELECT {'a': '[1, 2]'}::ROW(a JSON)
 ----
-{'a': [1, 2]}
+{'a': '[1, 2]'}
 
 query I
 SELECT {'a': 42, 'b': '[1, 2]'}::ROW(a JSON, b JSON)
 ----
-{'a': 42, 'b': [1, 2]}
+{'a': 42, 'b': '[1, 2]'}
 
 query I
 SELECT {'a': 42, 'b': '[1, 2]'}::ROW(a JSON, b INT[])
@@ -62,7 +59,7 @@ Conversion Error
 query I
 SELECT '{a: [1, 2]}'::ROW(a JSON)
 ----
-{'a': [1, 2]}
+{'a': '[1, 2]'}
 
 # map with varchar to json
 query I
@@ -377,22 +374,22 @@ select * from roundtrip
 foreach all_flat true false
 
 query I nosort q1
-select v from test_vector_types(null::int[], all_flat=${all_flat}) tbl(v)
+select v from test_vector_types(null::int[], all_flat={all_flat}) tbl(v)
 ----
 
 
 query I nosort q1
-select v::JSON::INT[] from test_vector_types(null::int[], all_flat=${all_flat}) tbl(v)
+select v::JSON::INT[] from test_vector_types(null::int[], all_flat={all_flat}) tbl(v)
 ----
 
 
 query I nosort q2
-select v from test_vector_types(NULL::ROW(i INTEGER, j VARCHAR), all_flat=${all_flat}) tbl(v)
+select v from test_vector_types(NULL::ROW(i INTEGER, j VARCHAR), all_flat={all_flat}) tbl(v)
 ----
 
 
 query I nosort q2
-select v::JSON::ROW(i INTEGER, j VARCHAR) from test_vector_types(NULL::ROW(i INTEGER, j VARCHAR), all_flat=${all_flat}) tbl(v)
+select v::JSON::ROW(i INTEGER, j VARCHAR) from test_vector_types(NULL::ROW(i INTEGER, j VARCHAR), all_flat={all_flat}) tbl(v)
 ----
 
 
@@ -419,3 +416,35 @@ statement error
 select ('duck' || chr(0))::JSON
 ----
 Conversion Error
+
+# some varchar -> json[] and json[] -> varchar tests
+# this is needed because our varchar -> varchar[] (and vice versa) escape quotes or add them
+# this tests the special-case implementation for these casts
+
+# issue 17647
+query I
+select '[{"some_key":"some_v}alue"}]'::json[];
+----
+[{"some_key":"some_v}alue"}]
+
+# internal issue 5498
+query I
+with cte1 as (select 'a' as a),
+cte2 as (select array_agg(cte1::json) as value from cte1)
+select value::json[] from cte2;
+----
+[{"a":"a"}]
+
+# larger test
+query II
+with cte1 as (
+    select array_agg({duck:42}::json) json_list_value
+    from range(5_000)
+), cte2 as (
+    select '[' || string_agg('{"duck":42}', ', ') || ']' string_value
+    from range(5_000)
+)
+select json_list_value::varchar = string_value, json_list_value = string_value::json[]
+from cte1, cte2
+----
+true	true

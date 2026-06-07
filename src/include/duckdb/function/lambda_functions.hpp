@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/execution/expression_executor_state.hpp"
 #include "duckdb/execution/expression_executor.hpp"
@@ -19,8 +20,10 @@ namespace duckdb {
 
 struct ListLambdaBindData final : public FunctionData {
 public:
-	ListLambdaBindData(const LogicalType &return_type, unique_ptr<Expression> lambda_expr, const bool has_index = false)
-	    : return_type(return_type), lambda_expr(std::move(lambda_expr)), has_index(has_index) {};
+	ListLambdaBindData(const LogicalType &return_type, unique_ptr<Expression> lambda_expr, const bool has_index = false,
+	                   const bool has_initial = false)
+	    : return_type(return_type), lambda_expr(std::move(lambda_expr)), has_index(has_index),
+	      has_initial(has_initial) {};
 
 	//! Return type of the scalar function
 	LogicalType return_type;
@@ -28,39 +31,41 @@ public:
 	unique_ptr<Expression> lambda_expr;
 	//! True, if the last parameter in a lambda parameter list represents the index of the current list element
 	bool has_index;
+	bool has_initial;
 
 public:
 	unique_ptr<FunctionData> Copy() const override {
 		auto lambda_expr_copy = lambda_expr ? lambda_expr->Copy() : nullptr;
-		return make_uniq<ListLambdaBindData>(return_type, std::move(lambda_expr_copy), has_index);
+		return make_uniq<ListLambdaBindData>(return_type, std::move(lambda_expr_copy), has_index, has_initial);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<ListLambdaBindData>();
 		return Expression::Equals(lambda_expr, other.lambda_expr) && return_type == other.return_type &&
-		       has_index == other.has_index;
+		       has_index == other.has_index && has_initial == other.has_initial;
 	}
 
 	//! Serializes a lambda function's bind data
 	static void Serialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
-	                      const ScalarFunction &function);
+	                      const BoundScalarFunction &function);
 	//! Deserializes a lambda function's bind data
-	static unique_ptr<FunctionData> Deserialize(Deserializer &deserializer, ScalarFunction &);
+	static unique_ptr<FunctionData> Deserialize(Deserializer &deserializer, BoundScalarFunction &);
 };
 
 class LambdaFunctions {
 public:
+	//! Returns the list child type
+	static LogicalType DetermineListChildType(const LogicalType &child_type);
+
 	//! Returns the parameter type for binary lambdas
-	static LogicalType BindBinaryLambda(const idx_t parameter_idx, const LogicalType &list_child_type);
-	//! Returns the parameter type for ternary lambdas
-	static LogicalType BindTernaryLambda(const idx_t parameter_idx, const LogicalType &list_child_type);
+	static LogicalType BindBinaryChildren(const vector<LogicalType> &function_child_types, const idx_t parameter_idx);
 
 	//! Checks for NULL list parameter and prepared statements and adds bound cast expression
 	static unique_ptr<FunctionData> ListLambdaPrepareBind(vector<unique_ptr<Expression>> &arguments,
-	                                                      ClientContext &context, ScalarFunction &bound_function);
+	                                                      ClientContext &context, BoundScalarFunction &bound_function);
 
 	//! Returns the ListLambdaBindData containing the lambda expression
-	static unique_ptr<FunctionData> ListLambdaBind(ClientContext &, ScalarFunction &bound_function,
+	static unique_ptr<FunctionData> ListLambdaBind(ClientContext &, BoundScalarFunction &bound_function,
 	                                               vector<unique_ptr<Expression>> &arguments,
 	                                               const bool has_index = false);
 
@@ -93,26 +98,26 @@ public:
 			Vector &list_column = args.data[0];
 
 			result.SetVectorType(VectorType::FLAT_VECTOR);
-			result_validity = &FlatVector::Validity(result);
+			result_validity = &FlatVector::ValidityMutable(result);
 
 			if (list_column.GetType().id() == LogicalTypeId::SQLNULL) {
-				result.SetVectorType(VectorType::CONSTANT_VECTOR);
-				ConstantVector::SetNull(result, true);
+				ConstantVector::SetNull(result, count_t(row_count));
 				result_is_null = true;
 				return;
 			}
 
 			// get the lambda expression
 			auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-			auto &bind_info = func_expr.bind_info->Cast<ListLambdaBindData>();
+			auto &bind_info = func_expr.BindInfo()->Cast<ListLambdaBindData>();
 			lambda_expr = bind_info.lambda_expr;
 			is_volatile = lambda_expr->IsVolatile();
 			has_index = bind_info.has_index;
+			has_initial = bind_info.has_initial;
 
 			// get the list column entries
-			list_column.ToUnifiedFormat(row_count, list_column_format);
+			list_column.ToUnifiedFormat(list_column_format);
 			list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_column_format);
-			child_vector = &ListVector::GetEntry(list_column);
+			child_vector = &ListVector::GetChildMutable(list_column);
 
 			// get the lambda column data for all other input vectors
 			column_infos = LambdaFunctions::GetColumnInfo(args, row_count);
@@ -128,6 +133,7 @@ public:
 
 		const idx_t row_count;
 		bool has_index;
+		bool has_initial;
 		bool is_volatile;
 		const bool is_all_constant;
 	};

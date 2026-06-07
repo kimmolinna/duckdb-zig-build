@@ -3,9 +3,6 @@
 # group: [delete]
 
 statement ok
-PRAGMA enable_verification;
-
-statement ok
 CREATE TABLE a(i INTEGER);
 
 statement ok
@@ -82,8 +79,10 @@ SELECT * FROM a;
 statement error
 DELETE FROM a USING b WHERE a.i=b.i;
 ----
+<REGEX>:.*Catalog Error.*does not exist.*
 
 # column does not exist
 statement error
 DELETE FROM a USING a b WHERE a.i=b.j;
 ----
+<REGEX>:.*Binder Error.*does not have a column.*

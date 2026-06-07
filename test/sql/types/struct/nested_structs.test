@@ -2,11 +2,6 @@
 # description: Test storing nested structs in tables
 # group: [struct]
 
-require skip_reload
-
-statement ok
-PRAGMA enable_verification
-
 statement ok
 CREATE TABLE a(c ROW(i ROW(a INTEGER), j INTEGER));
 
@@ -80,11 +75,14 @@ SELECT (c).a FROM b
 statement error
 INSERT INTO a VALUES (1)
 ----
+<REGEX>:.*Conversion Error.*Unimplemented type for cast.*
 
 statement error
 INSERT INTO a VALUES (ROW(1, 2))
 ----
+<REGEX>:.*Conversion Error.*Unimplemented type for cast.*
 
 statement error
 INSERT INTO a VALUES (ROW(ROW(1, 2, 3), 1))
 ----
+<REGEX>:.*Mismatch Type Error.*Cannot cast STRUCTs of different size.*

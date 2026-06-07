@@ -13,8 +13,9 @@ if res.returncode != 0:
 culprits = []
 
 whitelist = [
-    '@@GLIBC',
-    '@@CXXABI',
+    '@GLIBC',
+    '@GCC',
+    '@CXXABI',
     '__gnu_cxx::',
     'std::',
     'N6duckdb',

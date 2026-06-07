@@ -4,9 +4,6 @@
 
 require json
 
-statement ok
-pragma enable_verification
-
 # aliases
 query T
 select from_json('42', '"UBIGINT"')
@@ -21,12 +18,13 @@ select from_json_strict('42', '"UBIGINT"')
 statement error
 select from_json_strict('42', '"DATE"')
 ----
+<REGEX>:.*Invalid Input Error.*Unable to cast.*
 
 # singletons
 statement error
 select json_transform('42', '42')
 ----
-Binder Error
+<REGEX>:.*Binder Error.*invalid JSON structure.*
 
 query T
 select json_transform('42', '"UBIGINT"')
@@ -67,17 +65,17 @@ select json_transform('{"a": 42}', '{"a":"UBIGINT"}')
 statement error
 select json_transform_strict('{"a": 42, "a":43}', '{"a":"UBIGINT"}')
 ----
-Invalid Input Error
+<REGEX>:.*Invalid Input Error.*has duplicate key.*
 
 statement error
 select json_transform_strict('{}', '{"a":"UBIGINT"}')
 ----
-Invalid Input Error
+<REGEX>:.*Invalid Input Error.*does not have key.*
 
 statement error
 select json_transform_strict('{}', '["UBIGINT"]')
 ----
-Invalid Input Error
+<REGEX>:.*Invalid Input Error.*Expected ARRAY, but got OBJECT.*
 
 query T
 select json_transform('[{}, [42]]', '[["UBIGINT"]]')
@@ -97,12 +95,13 @@ select json_transform('{"a": 42}', '{"a":"NULL"}')
 statement error
 select json_transform('{"a": 42}', '{"a":"ARRAY"}')
 ----
+<REGEX>:.*Invalid Input Error.*can not be converted to a DuckDB Type.*
 
 # arrays
 statement error
 select json_transform('[1,2,3]', '["UBIGINT", "BIGINT"]')
 ----
-Binder Error
+<REGEX>:.*Binder Error.*Too many values in array.*
 
 query T
 select list_sum(json_transform(range(5000)::JSON, '["UBIGINT"]'))::UBIGINT s
@@ -154,12 +153,13 @@ NULL
 statement error
 select json_transform('{"a": 4, "a": 2}', '{"a": "UBIGINT", "a": "UBIGINT"}')
 ----
+<REGEX>:.*Invalid Input Error.*Duplicate keys in object.*
 
 # can actually get parts of the JSON back as string
 query T
 select json_transform('{"a": {"duck": 42, "goose": 7}}', '{"a": "JSON"}')
 ----
-{'a': {"duck":42,"goose":7}}
+{'a': '{"duck":42,"goose":7}'}
 
 # loops over all types for coverage
 
@@ -167,50 +167,52 @@ select json_transform('{"a": {"duck": 42, "goose": 7}}', '{"a": "JSON"}')
 foreach type <integral>
 
 query T
-select json_transform('42', '"${type}"')
+select json_transform('42', '"{type}"')
 ----
 42
 
 query T
-select json_transform('42.42', '"${type}"')
+select json_transform('42.42', '"{type}"')
 ----
 42
 
 query T
-select json_transform('"42"', '"${type}"')
+select json_transform('"42"', '"{type}"')
 ----
 42
 
 query T
-select json_transform('true', '"${type}"')
+select json_transform('true', '"{type}"')
 ----
 1
 
 query T
-select json_transform('false', '"${type}"')
+select json_transform('false', '"{type}"')
 ----
 0
 
 query T
-select json_transform('[]', '"${type}"')
+select json_transform('[]', '"{type}"')
 ----
 NULL
 
 query T
-select json_transform('{}', '"${type}"')
+select json_transform('{}', '"{type}"')
 ----
 NULL
 
 statement error
-select json_transform_strict('[]', '"${type}"')
+select json_transform_strict('[]', '"{type}"')
 ----
+<REGEX>:.*Invalid Input Error.*Failed to cast value to numerical.*
 
 statement error
-select json_transform_strict('{}', '"${type}"')
+select json_transform_strict('{}', '"{type}"')
 ----
+<REGEX>:.*Invalid Input Error.*Failed to cast value to numerical.*
 
 query T
-select json_transform('null', '"${type}"')
+select json_transform('null', '"{type}"')
 ----
 NULL
 
@@ -229,6 +231,7 @@ NULL
 statement error
 select json_transform_strict('-42', '"UINTEGER"')
 ----
+<REGEX>:.*Invalid Input Error.*Failed to cast value to numerical.*
 
 # varchar
 query T
@@ -360,18 +363,22 @@ NULL
 statement error
 select json_transform_strict('42', '"DECIMAL(2,1)"')
 ----
+<REGEX>:.*Invalid Input Error.*Failed to cast value to decimal.*
 
 statement error
 select json_transform('42', '"DECIMAL(39)"')
 ----
+Binder Error: DECIMAL type width must be between 1 and 38
 
 statement error
 select json_transform('42', '"DECIMAL(2,4)"')
 ----
+Binder Error: DECIMAL type scale cannot be greater than width
 
 statement error
 select json_transform('42', '"DECIMAL(5,1,1)"')
 ----
+Binder Error: DECIMAL type can take at most two type modifiers, width and scale
 
 # uuid
 query T
@@ -387,7 +394,7 @@ NULL
 statement error
 select json_transform_strict('42', '"UUID"')
 ----
-Invalid Input Error
+<REGEX>:.*Invalid Input Error.*Unable to cast.*
 
 query T
 select json_transform('-42', '"UUID"')
@@ -417,6 +424,7 @@ NULL
 statement error
 select json_transform_strict('42', '"UUID"')
 ----
+<REGEX>:.*Invalid Input Error.*Unable to cast.*
 
 # date / time
 query T
@@ -477,6 +485,7 @@ NULL
 statement error
 select json_transform_strict('false', '"DATE"')
 ----
+<REGEX>:.*Invalid Input Error.*Unable to cast.*
 
 # timestamp
 query T
@@ -512,3 +521,26 @@ NULL
 statement error
 select json_transform_strict('42', '"TIMESTAMP"')
 ----
+<REGEX>:.*Invalid Input Error.*Unable to cast.*
+
+# enum tests
+statement ok
+CREATE OR REPLACE TYPE test_enum AS ENUM ('a', 'b', 'c');
+
+query T
+select json_transform('{"test": "a"}', '{"test": "test_enum"}')
+----
+{'test': a}
+
+query T
+select json_transform('{"test": ["a","b"]}', '{"test": "test_enum[]"}')
+----
+{'test': [a, b]}
+
+query T
+select json_transform('{"test": ["a","b"]}', '{"test": "test_enum[2]"}')
+----
+{'test': [a, b]}
+
+statement ok
+DROP TYPE test_enum;

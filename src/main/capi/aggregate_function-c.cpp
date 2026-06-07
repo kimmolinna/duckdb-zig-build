@@ -62,14 +62,14 @@ duckdb::AggregateFunctionSet &GetCAggregateFunctionSet(duckdb_aggregate_function
 	return *reinterpret_cast<duckdb::AggregateFunctionSet *>(function_set);
 }
 
-unique_ptr<FunctionData> CAPIAggregateBind(ClientContext &context, AggregateFunction &function,
-                                           vector<unique_ptr<Expression>> &arguments) {
-	auto &info = function.function_info->Cast<CAggregateFunctionInfo>();
+unique_ptr<FunctionData> CAPIAggregateBind(BindAggregateFunctionInput &input) {
+	auto &function = input.GetBoundFunction();
+	auto &info = function.GetExtraFunctionInfo().Cast<CAggregateFunctionInfo>();
 	return make_uniq<CAggregateFunctionBindData>(info);
 }
 
-idx_t CAPIAggregateStateSize(const AggregateFunction &function) {
-	auto &function_info = function.function_info->Cast<duckdb::CAggregateFunctionInfo>();
+idx_t CAPIAggregateStateSize(const BoundAggregateFunction &function) {
+	auto &function_info = function.GetExtraFunctionInfo().Cast<duckdb::CAggregateFunctionInfo>();
 	CAggregateExecuteInfo exec_info(function_info);
 	auto c_function_info = reinterpret_cast<duckdb_function_info>(&exec_info);
 	auto result = function_info.state_size(c_function_info);
@@ -79,8 +79,8 @@ idx_t CAPIAggregateStateSize(const AggregateFunction &function) {
 	return result;
 }
 
-void CAPIAggregateStateInit(const AggregateFunction &function, data_ptr_t state) {
-	auto &function_info = function.function_info->Cast<duckdb::CAggregateFunctionInfo>();
+void CAPIAggregateStateInit(const BoundAggregateFunction &function, data_ptr_t state) {
+	auto &function_info = function.GetExtraFunctionInfo().Cast<duckdb::CAggregateFunctionInfo>();
 	CAggregateExecuteInfo exec_info(function_info);
 	auto c_function_info = reinterpret_cast<duckdb_function_info>(&exec_info);
 	function_info.state_init(c_function_info, reinterpret_cast<duckdb_aggregate_state>(state));
@@ -93,13 +93,12 @@ void CAPIAggregateUpdate(Vector inputs[], AggregateInputData &aggr_input_data, i
                          idx_t count) {
 	DataChunk chunk;
 	for (idx_t c = 0; c < input_count; c++) {
-		inputs[c].Flatten(count);
-		chunk.data.emplace_back(inputs[c]);
+		inputs[c].Flatten();
+		chunk.data.emplace_back(Vector::Ref(inputs[c]));
 	}
-	chunk.SetCardinality(count);
 
 	auto &bind_data = aggr_input_data.bind_data->Cast<CAggregateFunctionBindData>();
-	auto state_data = FlatVector::GetData<duckdb_aggregate_state>(state);
+	auto state_data = FlatVector::GetDataMutableUnsafe<duckdb_aggregate_state>(state);
 	auto c_input_chunk = reinterpret_cast<duckdb_data_chunk>(&chunk);
 
 	CAggregateExecuteInfo exec_info(bind_data.info);
@@ -111,10 +110,10 @@ void CAPIAggregateUpdate(Vector inputs[], AggregateInputData &aggr_input_data, i
 }
 
 void CAPIAggregateCombine(Vector &state, Vector &combined, AggregateInputData &aggr_input_data, idx_t count) {
-	state.Flatten(count);
+	state.Flatten();
 	auto &bind_data = aggr_input_data.bind_data->Cast<CAggregateFunctionBindData>();
-	auto input_state_data = FlatVector::GetData<duckdb_aggregate_state>(state);
-	auto result_state_data = FlatVector::GetData<duckdb_aggregate_state>(combined);
+	auto input_state_data = FlatVector::GetDataMutableUnsafe<duckdb_aggregate_state>(state);
+	auto result_state_data = FlatVector::GetDataMutableUnsafe<duckdb_aggregate_state>(combined);
 	CAggregateExecuteInfo exec_info(bind_data.info);
 	auto c_function_info = reinterpret_cast<duckdb_function_info>(&exec_info);
 	bind_data.info.combine(c_function_info, input_state_data, result_state_data, count);
@@ -125,9 +124,9 @@ void CAPIAggregateCombine(Vector &state, Vector &combined, AggregateInputData &a
 
 void CAPIAggregateFinalize(Vector &state, AggregateInputData &aggr_input_data, Vector &result, idx_t count,
                            idx_t offset) {
-	state.Flatten(count);
+	state.Flatten();
 	auto &bind_data = aggr_input_data.bind_data->Cast<CAggregateFunctionBindData>();
-	auto input_state_data = FlatVector::GetData<duckdb_aggregate_state>(state);
+	auto input_state_data = FlatVector::GetDataMutableUnsafe<duckdb_aggregate_state>(state);
 	auto result_vector = reinterpret_cast<duckdb_vector>(&result);
 
 	CAggregateExecuteInfo exec_info(bind_data.info);
@@ -140,7 +139,7 @@ void CAPIAggregateFinalize(Vector &state, AggregateInputData &aggr_input_data, V
 
 void CAPIAggregateDestructor(Vector &state, AggregateInputData &aggr_input_data, idx_t count) {
 	auto &bind_data = aggr_input_data.bind_data->Cast<CAggregateFunctionBindData>();
-	auto input_state_data = FlatVector::GetData<duckdb_aggregate_state>(state);
+	auto input_state_data = FlatVector::GetDataMutableUnsafe<duckdb_aggregate_state>(state);
 	bind_data.info.destroy(input_state_data, count);
 }
 
@@ -149,12 +148,17 @@ void CAPIAggregateDestructor(Vector &state, AggregateInputData &aggr_input_data,
 using duckdb::GetCAggregateFunction;
 
 duckdb_aggregate_function duckdb_create_aggregate_function() {
-	auto function = new duckdb::AggregateFunction("", {}, duckdb::LogicalType::INVALID, duckdb::CAPIAggregateStateSize,
-	                                              duckdb::CAPIAggregateStateInit, duckdb::CAPIAggregateUpdate,
-	                                              duckdb::CAPIAggregateCombine, duckdb::CAPIAggregateFinalize, nullptr,
-	                                              duckdb::CAPIAggregateBind);
-	function->function_info = duckdb::make_shared_ptr<duckdb::CAggregateFunctionInfo>();
-	return reinterpret_cast<duckdb_aggregate_function>(function);
+	auto function = new duckdb::AggregateFunction(
+	    "", {}, duckdb::LogicalType::INVALID, duckdb::CAPIAggregateStateSize, duckdb::CAPIAggregateStateInit,
+	    duckdb::CAPIAggregateUpdate, duckdb::CAPIAggregateCombine, duckdb::CAPIAggregateFinalize,
+	    duckdb::FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, duckdb::CAPIAggregateBind);
+	try {
+		function->SetExtraFunctionInfo<duckdb::CAggregateFunctionInfo>();
+		return reinterpret_cast<duckdb_aggregate_function>(function);
+	} catch (...) {
+		delete function;
+		return nullptr;
+	}
 }
 
 void duckdb_destroy_aggregate_function(duckdb_aggregate_function *function) {
@@ -179,7 +183,7 @@ void duckdb_aggregate_function_add_parameter(duckdb_aggregate_function function,
 	}
 	auto &aggregate_function = GetCAggregateFunction(function);
 	auto logical_type = reinterpret_cast<duckdb::LogicalType *>(type);
-	aggregate_function.arguments.push_back(*logical_type);
+	aggregate_function.GetSignature().AddParameter(*logical_type);
 }
 
 void duckdb_aggregate_function_set_return_type(duckdb_aggregate_function function, duckdb_logical_type type) {
@@ -188,7 +192,7 @@ void duckdb_aggregate_function_set_return_type(duckdb_aggregate_function functio
 	}
 	auto &aggregate_function = GetCAggregateFunction(function);
 	auto logical_type = reinterpret_cast<duckdb::LogicalType *>(type);
-	aggregate_function.return_type = *logical_type;
+	aggregate_function.SetReturnType(*logical_type);
 }
 
 void duckdb_aggregate_function_set_functions(duckdb_aggregate_function function, duckdb_aggregate_state_size state_size,
@@ -198,7 +202,7 @@ void duckdb_aggregate_function_set_functions(duckdb_aggregate_function function,
 		return;
 	}
 	auto &aggregate_function = GetCAggregateFunction(function);
-	auto &function_info = aggregate_function.function_info->Cast<duckdb::CAggregateFunctionInfo>();
+	auto &function_info = aggregate_function.GetExtraFunctionInfo().Cast<duckdb::CAggregateFunctionInfo>();
 	function_info.state_size = state_size;
 	function_info.state_init = state_init;
 	function_info.update = update;
@@ -211,9 +215,9 @@ void duckdb_aggregate_function_set_destructor(duckdb_aggregate_function function
 		return;
 	}
 	auto &aggregate_function = GetCAggregateFunction(function);
-	auto &function_info = aggregate_function.function_info->Cast<duckdb::CAggregateFunctionInfo>();
+	auto &function_info = aggregate_function.GetExtraFunctionInfo().Cast<duckdb::CAggregateFunctionInfo>();
 	function_info.destroy = destroy;
-	aggregate_function.destructor = duckdb::CAPIAggregateDestructor;
+	aggregate_function.SetStateDestructorCallback(duckdb::CAPIAggregateDestructor);
 }
 
 duckdb_state duckdb_register_aggregate_function(duckdb_connection connection, duckdb_aggregate_function function) {
@@ -232,7 +236,7 @@ void duckdb_aggregate_function_set_special_handling(duckdb_aggregate_function fu
 		return;
 	}
 	auto &aggregate_function = GetCAggregateFunction(function);
-	aggregate_function.null_handling = duckdb::FunctionNullHandling::SPECIAL_HANDLING;
+	aggregate_function.SetNullHandling(duckdb::FunctionNullHandling::SPECIAL_HANDLING);
 }
 
 void duckdb_aggregate_function_set_extra_info(duckdb_aggregate_function function, void *extra_info,
@@ -241,7 +245,7 @@ void duckdb_aggregate_function_set_extra_info(duckdb_aggregate_function function
 		return;
 	}
 	auto &aggregate_function = GetCAggregateFunction(function);
-	auto &function_info = aggregate_function.function_info->Cast<duckdb::CAggregateFunctionInfo>();
+	auto &function_info = aggregate_function.GetExtraFunctionInfo().Cast<duckdb::CAggregateFunctionInfo>();
 	function_info.extra_info = static_cast<duckdb_function_info>(extra_info);
 	function_info.delete_callback = destroy;
 }
@@ -266,8 +270,12 @@ duckdb_aggregate_function_set duckdb_create_aggregate_function_set(const char *n
 	if (!name || !*name) {
 		return nullptr;
 	}
-	auto function_set = new duckdb::AggregateFunctionSet(name);
-	return reinterpret_cast<duckdb_aggregate_function_set>(function_set);
+	try {
+		auto function_set = new duckdb::AggregateFunctionSet(name);
+		return reinterpret_cast<duckdb_aggregate_function_set>(function_set);
+	} catch (...) {
+		return nullptr;
+	}
 }
 
 void duckdb_destroy_aggregate_function_set(duckdb_aggregate_function_set *set) {
@@ -296,18 +304,18 @@ duckdb_state duckdb_register_aggregate_function_set(duckdb_connection connection
 	}
 	auto &set = duckdb::GetCAggregateFunctionSet(function_set);
 	for (idx_t idx = 0; idx < set.Size(); idx++) {
-		auto &aggregate_function = set.GetFunctionReferenceByOffset(idx);
-		auto &info = aggregate_function.function_info->Cast<duckdb::CAggregateFunctionInfo>();
+		const auto &aggregate_function = set.GetFunctionByOffset(idx);
+		auto &info = aggregate_function.GetExtraFunctionInfo().Cast<duckdb::CAggregateFunctionInfo>();
 
 		if (aggregate_function.name.empty() || !info.update || !info.combine || !info.finalize) {
 			return DuckDBError;
 		}
-		if (duckdb::TypeVisitor::Contains(aggregate_function.return_type, duckdb::LogicalTypeId::INVALID) ||
-		    duckdb::TypeVisitor::Contains(aggregate_function.return_type, duckdb::LogicalTypeId::ANY)) {
+		if (duckdb::TypeVisitor::Contains(aggregate_function.GetReturnType(), duckdb::LogicalTypeId::INVALID) ||
+		    duckdb::TypeVisitor::Contains(aggregate_function.GetReturnType(), duckdb::LogicalTypeId::ANY)) {
 			return DuckDBError;
 		}
-		for (const auto &argument : aggregate_function.arguments) {
-			if (duckdb::TypeVisitor::Contains(argument, duckdb::LogicalTypeId::INVALID)) {
+		for (const auto &argument : aggregate_function.GetSignature().GetParameters()) {
+			if (duckdb::TypeVisitor::Contains(argument.GetType(), duckdb::LogicalTypeId::INVALID)) {
 				return DuckDBError;
 			}
 		}
@@ -318,6 +326,7 @@ duckdb_state duckdb_register_aggregate_function_set(duckdb_connection connection
 		con->context->RunFunctionInTransaction([&]() {
 			auto &catalog = duckdb::Catalog::GetSystemCatalog(*con->context);
 			duckdb::CreateAggregateFunctionInfo sf_info(set);
+			sf_info.on_conflict = duckdb::OnCreateConflict::ALTER_ON_CONFLICT;
 			catalog.CreateFunction(*con->context, sf_info);
 		});
 	} catch (...) {

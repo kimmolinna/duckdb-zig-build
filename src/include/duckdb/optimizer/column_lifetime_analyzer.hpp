@@ -27,6 +27,9 @@ public:
 
 	void VisitOperator(LogicalOperator &op) override;
 
+public:
+	static void ExtractColumnBindings(const Expression &expr, vector<ColumnBinding> &bindings);
+
 protected:
 	unique_ptr<Expression> VisitReplace(BoundColumnRefExpression &expr, unique_ptr<Expression> *expr_ptr) override;
 	unique_ptr<Expression> VisitReplace(BoundReferenceExpression &expr, unique_ptr<Expression> *expr_ptr) override;
@@ -45,7 +48,7 @@ private:
 	void StandardVisitOperator(LogicalOperator &op);
 	void ExtractUnusedColumnBindings(const vector<ColumnBinding> &bindings, column_binding_set_t &unused_bindings);
 	static void GenerateProjectionMap(vector<ColumnBinding> bindings, column_binding_set_t &unused_bindings,
-	                                  vector<idx_t> &map);
+	                                  vector<ProjectionIndex> &map);
 	void Verify(LogicalOperator &op);
 	void AddVerificationProjection(unique_ptr<LogicalOperator> &child);
 };

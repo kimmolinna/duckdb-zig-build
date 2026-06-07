@@ -46,7 +46,7 @@ public:
 	//! Contains all bindings that need to be updated
 	vector<ReplaceBinding> replace_bindings;
 	//! Stores the table index of the former child of the LOGICAL_UNNEST
-	idx_t overwritten_tbl_idx;
+	TableIndex overwritten_tbl_idx;
 };
 
 //! The UnnestRewriter optimizer traverses the logical operator tree and rewrites duplicate
@@ -61,7 +61,8 @@ public:
 
 private:
 	//! Find delim joins that contain an UNNEST
-	void FindCandidates(unique_ptr<LogicalOperator> &op, vector<reference<unique_ptr<LogicalOperator>>> &candidates);
+	void FindCandidates(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &op,
+	                    vector<reference<unique_ptr<LogicalOperator>>> &candidates);
 	//! Rewrite a delim join that contains an UNNEST
 	bool RewriteCandidate(unique_ptr<LogicalOperator> &candidate);
 	//! Update the bindings of the RHS sequence of LOGICAL_PROJECTION(s)
@@ -80,7 +81,7 @@ private:
 	//! Store the column bindings of the LHS child of the LOGICAL_DELIM_JOIN
 	vector<LHSBinding> lhs_bindings;
 	//! Stores the table index of the former child of the LOGICAL_UNNEST
-	idx_t overwritten_tbl_idx;
+	TableIndex overwritten_tbl_idx;
 	//! The number of distinct columns to unnest
 	idx_t distinct_unnest_count;
 };

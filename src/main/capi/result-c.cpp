@@ -9,6 +9,7 @@ struct CBaseConverter {
 	static void NullConvert(DST &target) {
 	}
 };
+
 struct CStandardConverter : public CBaseConverter {
 	template <class SRC, class DST>
 	static DST Convert(SRC input) {
@@ -54,7 +55,7 @@ struct CBlobConverter {
 struct CTimestampMsConverter : public CBaseConverter {
 	template <class SRC, class DST>
 	static DST Convert(SRC input) {
-		if (!Timestamp::IsFinite(input)) {
+		if (!input.IsFinite()) {
 			return input;
 		}
 		return Timestamp::FromEpochMs(input.value);
@@ -64,7 +65,7 @@ struct CTimestampMsConverter : public CBaseConverter {
 struct CTimestampNsConverter : public CBaseConverter {
 	template <class SRC, class DST>
 	static DST Convert(SRC input) {
-		if (!Timestamp::IsFinite(input)) {
+		if (!input.IsFinite()) {
 			return input;
 		}
 		return Timestamp::FromEpochNanoSeconds(input.value);
@@ -74,7 +75,7 @@ struct CTimestampNsConverter : public CBaseConverter {
 struct CTimestampSecConverter : public CBaseConverter {
 	template <class SRC, class DST>
 	static DST Convert(SRC input) {
-		if (!Timestamp::IsFinite(input)) {
+		if (!input.IsFinite()) {
 			return input;
 		}
 		return Timestamp::FromEpochSeconds(input.value);
@@ -129,7 +130,7 @@ void WriteData(duckdb_column *column, ColumnDataCollection &source, const vector
 	auto target = (DST *)column->deprecated_data;
 	for (auto &input : source.Chunks(column_ids)) {
 		auto source = FlatVector::GetData<SRC>(input.data[0]);
-		auto &mask = FlatVector::Validity(input.data[0]);
+		auto &mask = FlatVector::ValidityMutable(input.data[0]);
 
 		for (idx_t k = 0; k < input.size(); k++, row++) {
 			if (!mask.RowIsValid(k)) {
@@ -146,6 +147,9 @@ duckdb_state deprecated_duckdb_translate_column(MaterializedQueryResult &result,
 	auto &collection = result.Collection();
 	idx_t row_count = collection.Count();
 	column->deprecated_nullmask = (bool *)duckdb_malloc(sizeof(bool) * collection.Count());
+	if (!column->deprecated_nullmask) {
+		return DuckDBError;
+	}
 
 	auto type_size = GetCTypeSize(column->deprecated_type);
 	if (type_size == 0) {
@@ -158,7 +162,7 @@ duckdb_state deprecated_duckdb_translate_column(MaterializedQueryResult &result,
 	}
 
 	column->deprecated_data = duckdb_malloc(type_size * row_count);
-	if (!column->deprecated_nullmask || !column->deprecated_data) { // LCOV_EXCL_START
+	if (!column->deprecated_data) { // LCOV_EXCL_START
 		// malloc failure
 		return DuckDBError;
 	} // LCOV_EXCL_STOP
@@ -214,6 +218,9 @@ duckdb_state deprecated_duckdb_translate_column(MaterializedQueryResult &result,
 	case LogicalTypeId::TIME:
 		WriteData<dtime_t>(column, collection, column_ids);
 		break;
+	case LogicalTypeId::TIME_NS:
+		WriteData<dtime_ns_t>(column, collection, column_ids);
+		break;
 	case LogicalTypeId::TIME_TZ:
 		WriteData<dtime_tz_t>(column, collection, column_ids);
 		break;
@@ -229,10 +236,10 @@ duckdb_state deprecated_duckdb_translate_column(MaterializedQueryResult &result,
 		WriteData<string_t, duckdb_blob, CBlobConverter>(column, collection, column_ids);
 		break;
 	}
-	case LogicalTypeId::TIMESTAMP_NS: {
+	case LogicalTypeId::TIMESTAMP_NS:
+	case LogicalTypeId::TIMESTAMP_TZ_NS:
 		WriteData<timestamp_t, timestamp_t, CTimestampNsConverter>(column, collection, column_ids);
 		break;
-	}
 	case LogicalTypeId::TIMESTAMP_MS: {
 		WriteData<timestamp_t, timestamp_t, CTimestampMsConverter>(column, collection, column_ids);
 		break;
@@ -353,7 +360,7 @@ bool DeprecatedMaterializeResult(duckdb_result *result) {
 	// zero initialize the columns (so we can cleanly delete it in case a malloc fails)
 	memset(result->deprecated_columns, 0, sizeof(duckdb_column) * column_count);
 	for (idx_t i = 0; i < column_count; i++) {
-		result->deprecated_columns[i].deprecated_type = ConvertCPPTypeToC(result_data->result->types[i]);
+		result->deprecated_columns[i].deprecated_type = LogicalTypeIdToC(result_data->result->types[i].id());
 		result->deprecated_columns[i].deprecated_name = (char *)result_data->result->names[i].c_str(); // NOLINT
 	}
 
@@ -374,98 +381,6 @@ bool DeprecatedMaterializeResult(duckdb_result *result) {
 		}
 	}
 	return true;
-}
-
-duckdb_error_type CAPIErrorType(ExceptionType type) {
-	switch (type) {
-	case ExceptionType::INVALID:
-		return DUCKDB_ERROR_INVALID;
-	case ExceptionType::OUT_OF_RANGE:
-		return DUCKDB_ERROR_OUT_OF_RANGE;
-	case ExceptionType::CONVERSION:
-		return DUCKDB_ERROR_CONVERSION;
-	case ExceptionType::UNKNOWN_TYPE:
-		return DUCKDB_ERROR_UNKNOWN_TYPE;
-	case ExceptionType::DECIMAL:
-		return DUCKDB_ERROR_DECIMAL;
-	case ExceptionType::MISMATCH_TYPE:
-		return DUCKDB_ERROR_MISMATCH_TYPE;
-	case ExceptionType::DIVIDE_BY_ZERO:
-		return DUCKDB_ERROR_DIVIDE_BY_ZERO;
-	case ExceptionType::OBJECT_SIZE:
-		return DUCKDB_ERROR_OBJECT_SIZE;
-	case ExceptionType::INVALID_TYPE:
-		return DUCKDB_ERROR_INVALID_TYPE;
-	case ExceptionType::SERIALIZATION:
-		return DUCKDB_ERROR_SERIALIZATION;
-	case ExceptionType::TRANSACTION:
-		return DUCKDB_ERROR_TRANSACTION;
-	case ExceptionType::NOT_IMPLEMENTED:
-		return DUCKDB_ERROR_NOT_IMPLEMENTED;
-	case ExceptionType::EXPRESSION:
-		return DUCKDB_ERROR_EXPRESSION;
-	case ExceptionType::CATALOG:
-		return DUCKDB_ERROR_CATALOG;
-	case ExceptionType::PARSER:
-		return DUCKDB_ERROR_PARSER;
-	case ExceptionType::PLANNER:
-		return DUCKDB_ERROR_PLANNER;
-	case ExceptionType::SCHEDULER:
-		return DUCKDB_ERROR_SCHEDULER;
-	case ExceptionType::EXECUTOR:
-		return DUCKDB_ERROR_EXECUTOR;
-	case ExceptionType::CONSTRAINT:
-		return DUCKDB_ERROR_CONSTRAINT;
-	case ExceptionType::INDEX:
-		return DUCKDB_ERROR_INDEX;
-	case ExceptionType::STAT:
-		return DUCKDB_ERROR_STAT;
-	case ExceptionType::CONNECTION:
-		return DUCKDB_ERROR_CONNECTION;
-	case ExceptionType::SYNTAX:
-		return DUCKDB_ERROR_SYNTAX;
-	case ExceptionType::SETTINGS:
-		return DUCKDB_ERROR_SETTINGS;
-	case ExceptionType::BINDER:
-		return DUCKDB_ERROR_BINDER;
-	case ExceptionType::NETWORK:
-		return DUCKDB_ERROR_NETWORK;
-	case ExceptionType::OPTIMIZER:
-		return DUCKDB_ERROR_OPTIMIZER;
-	case ExceptionType::NULL_POINTER:
-		return DUCKDB_ERROR_NULL_POINTER;
-	case ExceptionType::IO:
-		return DUCKDB_ERROR_IO;
-	case ExceptionType::INTERRUPT:
-		return DUCKDB_ERROR_INTERRUPT;
-	case ExceptionType::FATAL:
-		return DUCKDB_ERROR_FATAL;
-	case ExceptionType::INTERNAL:
-		return DUCKDB_ERROR_INTERNAL;
-	case ExceptionType::INVALID_INPUT:
-		return DUCKDB_ERROR_INVALID_INPUT;
-	case ExceptionType::OUT_OF_MEMORY:
-		return DUCKDB_ERROR_OUT_OF_MEMORY;
-	case ExceptionType::PERMISSION:
-		return DUCKDB_ERROR_PERMISSION;
-	case ExceptionType::PARAMETER_NOT_RESOLVED:
-		return DUCKDB_ERROR_PARAMETER_NOT_RESOLVED;
-	case ExceptionType::PARAMETER_NOT_ALLOWED:
-		return DUCKDB_ERROR_PARAMETER_NOT_ALLOWED;
-	case ExceptionType::DEPENDENCY:
-		return DUCKDB_ERROR_DEPENDENCY;
-	case ExceptionType::HTTP:
-		return DUCKDB_ERROR_HTTP;
-	case ExceptionType::MISSING_EXTENSION:
-		return DUCKDB_ERROR_MISSING_EXTENSION;
-	case ExceptionType::AUTOLOAD:
-		return DUCKDB_ERROR_AUTOLOAD;
-	case ExceptionType::SEQUENCE:
-		return DUCKDB_ERROR_SEQUENCE;
-	case ExceptionType::INVALID_CONFIGURATION:
-		return DUCKDB_INVALID_CONFIGURATION;
-	}
-	return DUCKDB_ERROR_INVALID;
 }
 
 } // namespace duckdb
@@ -523,7 +438,7 @@ duckdb_type duckdb_column_type(duckdb_result *result, idx_t col) {
 		return DUCKDB_TYPE_INVALID;
 	}
 	auto &result_data = *(reinterpret_cast<duckdb::DuckDBResultData *>(result->internal_data));
-	return duckdb::ConvertCPPTypeToC(result_data.result->types[col]);
+	return duckdb::LogicalTypeIdToC(result_data.result->types[col].id());
 }
 
 duckdb_logical_type duckdb_column_logical_type(duckdb_result *result, idx_t col) {
@@ -532,6 +447,18 @@ duckdb_logical_type duckdb_column_logical_type(duckdb_result *result, idx_t col)
 	}
 	auto &result_data = *(reinterpret_cast<duckdb::DuckDBResultData *>(result->internal_data));
 	return reinterpret_cast<duckdb_logical_type>(new duckdb::LogicalType(result_data.result->types[col]));
+}
+
+duckdb_arrow_options duckdb_result_get_arrow_options(duckdb_result *result) {
+	if (!result) {
+		return nullptr;
+	}
+	auto &result_data = *(reinterpret_cast<duckdb::DuckDBResultData *>(result->internal_data));
+	if (!result_data.result) {
+		return nullptr;
+	}
+	auto arrow_options_wrapper = new duckdb::CClientArrowOptionsWrapper(result_data.result->client_properties);
+	return reinterpret_cast<duckdb_arrow_options>(arrow_options_wrapper);
 }
 
 idx_t duckdb_column_count(duckdb_result *result) {
@@ -615,7 +542,7 @@ duckdb_error_type duckdb_result_error_type(duckdb_result *result) {
 	if (!result_data.result->HasError()) {
 		return DUCKDB_ERROR_INVALID;
 	}
-	return duckdb::CAPIErrorType(result_data.result->GetErrorType());
+	return duckdb::ErrorTypeToC(result_data.result->GetErrorType());
 }
 
 idx_t duckdb_result_chunk_count(duckdb_result result) {

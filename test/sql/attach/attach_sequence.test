@@ -2,10 +2,8 @@
 # description: Test attach mixed with sequences and default values
 # group: [attach]
 
-require skip_reload
-
 statement ok
-ATTACH DATABASE '__TEST_DIR__/attach_seq.db' AS db1;
+ATTACH DATABASE '{TEST_DIR}/attach_seq.db' AS db1;
 
 statement ok
 CREATE SEQUENCE seq;
@@ -40,4 +38,4 @@ statement ok
 detach db1;
 
 statement ok
-ATTACH DATABASE '__TEST_DIR__/attach_seq.db' AS db1;
+ATTACH DATABASE '{TEST_DIR}/attach_seq.db' AS db1;

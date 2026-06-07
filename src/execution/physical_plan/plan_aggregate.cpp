@@ -1,5 +1,5 @@
-#include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
-#include "duckdb/common/operator/subtract.hpp"
+#include "duckdb/main/settings.hpp"
+
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
 #include "duckdb/execution/operator/aggregate/physical_perfecthash_aggregate.hpp"
 #include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
@@ -9,8 +9,6 @@
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/parser/expression/comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 
@@ -42,15 +40,22 @@ static bool CanUsePartitionedAggregate(ClientContext &context, LogicalAggregate 
 			return false;
 		}
 	}
+
+	return PhysicalPlanGenerator::HasSingleValuePartitions(context, op.groups, child, partition_columns);
+}
+
+bool PhysicalPlanGenerator::HasSingleValuePartitions(ClientContext &context,
+                                                     const vector<unique_ptr<Expression>> &partitions,
+                                                     PhysicalOperator &child, vector<column_t> &partition_columns) {
 	// check if the source is partitioned by the aggregate columns
 	// figure out the columns we are grouping by
-	for (auto &group_expr : op.groups) {
+	for (auto &group_expr : partitions) {
 		// only support bound reference here
 		if (group_expr->GetExpressionType() != ExpressionType::BOUND_REF) {
 			return false;
 		}
 		auto &ref = group_expr->Cast<BoundReferenceExpression>();
-		partition_columns.push_back(ref.index);
+		partition_columns.push_back(ref.Index());
 	}
 	// traverse the children of the aggregate to find the source operator
 	reference<PhysicalOperator> child_ref(child);
@@ -68,16 +73,16 @@ static bool CanUsePartitionedAggregate(ClientContext &context, LogicalAggregate 
 					return false;
 				}
 				auto &ref = expr->Cast<BoundReferenceExpression>();
-				new_columns.push_back(ref.index);
+				new_columns.push_back(ref.Index());
 			}
 			// continue into child node with new columns
 			partition_columns = std::move(new_columns);
-			child_ref = *child_op.children[0];
+			child_ref = child_op.children[0];
 			break;
 		}
 		case PhysicalOperatorType::FILTER:
 			// continue into child operators
-			child_ref = *child_op.children[0];
+			child_ref = child_op.children[0];
 			break;
 		default:
 			// unsupported operator for partition pass-through
@@ -117,14 +122,11 @@ static bool CanUsePerfectHashAggregate(ClientContext &context, LogicalAggregate 
 		return false;
 	}
 	idx_t perfect_hash_bits = 0;
-	if (op.group_stats.empty()) {
-		op.group_stats.resize(op.groups.size());
-	}
 	for (idx_t group_idx = 0; group_idx < op.groups.size(); group_idx++) {
 		auto &group = op.groups[group_idx];
 		auto &stats = op.group_stats[group_idx];
 
-		switch (group->return_type.InternalType()) {
+		switch (group->GetReturnType().InternalType()) {
 		case PhysicalType::INT8:
 		case PhysicalType::INT16:
 		case PhysicalType::INT32:
@@ -139,7 +141,7 @@ static bool CanUsePerfectHashAggregate(ClientContext &context, LogicalAggregate 
 			return false;
 		}
 		// check if the group has stats available
-		auto &group_type = group->return_type;
+		auto &group_type = group->GetReturnType();
 		if (!stats) {
 			// no stats, but we might still be able to use perfect hashing if the type is small enough
 			// for small types we can just set the stats to [type_min, type_max]
@@ -218,14 +220,14 @@ static bool CanUsePerfectHashAggregate(ClientContext &context, LogicalAggregate 
 		bits_per_group.push_back(required_bits);
 		perfect_hash_bits += required_bits;
 		// check if we have exceeded the bits for the hash
-		if (perfect_hash_bits > ClientConfig::GetConfig(context).perfect_ht_threshold) {
+		if (perfect_hash_bits > Settings::Get<PerfectHtThresholdSetting>(context)) {
 			// too many bits for perfect hash
 			return false;
 		}
 	}
 	for (auto &expression : op.expressions) {
 		auto &aggregate = expression->Cast<BoundAggregateExpression>();
-		if (aggregate.IsDistinct() || !aggregate.function.combine) {
+		if (aggregate.IsDistinct() || !aggregate.Function().HasStateCombineCallback()) {
 			// distinct aggregates are not supported in perfect hash aggregates
 			return false;
 		}
@@ -233,100 +235,113 @@ static bool CanUsePerfectHashAggregate(ClientContext &context, LogicalAggregate 
 	return true;
 }
 
-unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalAggregate &op) {
-	unique_ptr<PhysicalOperator> groupby;
+PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalAggregate &op) {
 	D_ASSERT(op.children.size() == 1);
 
-	auto plan = CreatePlan(*op.children[0]);
-
-	plan = ExtractAggregateExpressions(std::move(plan), op.expressions, op.groups);
+	reference<PhysicalOperator> plan = CreatePlan(*op.children[0]);
+	plan = ExtractAggregateExpressions(plan, op.expressions, op.groups, op.grouping_sets);
 
 	bool can_use_simple_aggregation = true;
 	for (auto &expression : op.expressions) {
 		auto &aggregate = expression->Cast<BoundAggregateExpression>();
-		if (!aggregate.function.simple_update) {
+		if (!aggregate.Function().GetStateClusterUpdateCallback()) {
 			// unsupported aggregate for simple aggregation: use hash aggregation
 			can_use_simple_aggregation = false;
 			break;
 		}
 	}
-	if (op.groups.empty() && op.grouping_sets.size() <= 1) {
-		// no groups, check if we can use a simple aggregation
-		// special case: aggregate entire columns together
-		if (can_use_simple_aggregation) {
-			groupby = make_uniq_base<PhysicalOperator, PhysicalUngroupedAggregate>(op.types, std::move(op.expressions),
-			                                                                       op.estimated_cardinality);
-		} else {
-			groupby = make_uniq_base<PhysicalOperator, PhysicalHashAggregate>(
-			    context, op.types, std::move(op.expressions), op.estimated_cardinality);
-		}
-	} else {
-		// groups! create a GROUP BY aggregator
-		// use a partitioned or perfect hash aggregate if possible
-		vector<column_t> partition_columns;
-		vector<idx_t> required_bits;
-		if (can_use_simple_aggregation && CanUsePartitionedAggregate(context, op, *plan, partition_columns)) {
-			groupby = make_uniq_base<PhysicalOperator, PhysicalPartitionedAggregate>(
-			    context, op.types, std::move(op.expressions), std::move(op.groups), std::move(partition_columns),
-			    op.estimated_cardinality);
-		} else if (CanUsePerfectHashAggregate(context, op, required_bits)) {
-			groupby = make_uniq_base<PhysicalOperator, PhysicalPerfectHashAggregate>(
-			    context, op.types, std::move(op.expressions), std::move(op.groups), std::move(op.group_stats),
-			    std::move(required_bits), op.estimated_cardinality);
-		} else {
-			groupby = make_uniq_base<PhysicalOperator, PhysicalHashAggregate>(
-			    context, op.types, std::move(op.expressions), std::move(op.groups), std::move(op.grouping_sets),
-			    std::move(op.grouping_functions), op.estimated_cardinality);
-		}
+
+	// Check if all groups are valid
+	if (op.group_stats.empty()) {
+		op.group_stats.resize(op.groups.size());
 	}
-	groupby->children.push_back(std::move(plan));
-	return groupby;
+	auto group_validity = TupleDataValidityType::CANNOT_HAVE_NULL_VALUES;
+	for (const auto &stats : op.group_stats) {
+		if (stats && !stats->CanHaveNull()) {
+			continue;
+		}
+		group_validity = TupleDataValidityType::CAN_HAVE_NULL_VALUES;
+		break;
+	}
+
+	if (op.groups.empty() && op.grouping_sets.size() <= 1) {
+		// no groups: use the dedicated ungrouped aggregate path
+		auto &group_by = Make<PhysicalUngroupedAggregate>(op.types, std::move(op.expressions), op.estimated_cardinality,
+		                                                  op.distinct_validity);
+		group_by.children.push_back(plan);
+		return group_by;
+	}
+
+	// groups! create a GROUP BY aggregator
+	// use a partitioned or perfect hash aggregate if possible
+	vector<column_t> partition_columns;
+	vector<idx_t> required_bits;
+	if (can_use_simple_aggregation && CanUsePartitionedAggregate(context, op, plan, partition_columns)) {
+		auto &group_by =
+		    Make<PhysicalPartitionedAggregate>(context, op.types, std::move(op.expressions), std::move(op.groups),
+		                                       std::move(partition_columns), op.estimated_cardinality);
+		group_by.children.push_back(plan);
+		return group_by;
+	}
+
+	if (CanUsePerfectHashAggregate(context, op, required_bits)) {
+		auto &group_by = Make<PhysicalPerfectHashAggregate>(context, op.types, std::move(op.expressions),
+		                                                    std::move(op.groups), std::move(op.group_stats),
+		                                                    std::move(required_bits), op.estimated_cardinality);
+		group_by.children.push_back(plan);
+		return group_by;
+	}
+
+	auto &group_by = Make<PhysicalHashAggregate>(context, op.types, std::move(op.expressions), std::move(op.groups),
+	                                             std::move(op.grouping_sets), std::move(op.grouping_functions),
+	                                             op.estimated_cardinality, group_validity, op.distinct_validity);
+	group_by.children.push_back(plan);
+	return group_by;
 }
 
-unique_ptr<PhysicalOperator>
-PhysicalPlanGenerator::ExtractAggregateExpressions(unique_ptr<PhysicalOperator> child,
-                                                   vector<unique_ptr<Expression>> &aggregates,
-                                                   vector<unique_ptr<Expression>> &groups) {
+PhysicalOperator &PhysicalPlanGenerator::ExtractAggregateExpressions(PhysicalOperator &child,
+                                                                     vector<unique_ptr<Expression>> &aggregates,
+                                                                     vector<unique_ptr<Expression>> &groups,
+                                                                     optional_ptr<vector<GroupingSet>> grouping_sets) {
 	vector<unique_ptr<Expression>> expressions;
 	vector<LogicalType> types;
 
 	// bind sorted aggregates
 	for (auto &aggr : aggregates) {
 		auto &bound_aggr = aggr->Cast<BoundAggregateExpression>();
-		if (bound_aggr.order_bys) {
+		if (bound_aggr.GetOrderBys()) {
 			// sorted aggregate!
-			FunctionBinder::BindSortedAggregate(context, bound_aggr, groups);
+			FunctionBinder::BindSortedAggregate(context, bound_aggr, groups, grouping_sets);
 		}
 	}
 	for (auto &group : groups) {
-		auto ref = make_uniq<BoundReferenceExpression>(group->return_type, expressions.size());
-		types.push_back(group->return_type);
+		auto ref = make_uniq<BoundReferenceExpression>(group->GetReturnType(), expressions.size());
+		types.push_back(group->GetReturnType());
 		expressions.push_back(std::move(group));
 		group = std::move(ref);
 	}
 	for (auto &aggr : aggregates) {
 		auto &bound_aggr = aggr->Cast<BoundAggregateExpression>();
-		for (auto &child : bound_aggr.children) {
-			auto ref = make_uniq<BoundReferenceExpression>(child->return_type, expressions.size());
-			types.push_back(child->return_type);
-			expressions.push_back(std::move(child));
-			child = std::move(ref);
+		for (auto &child_expr : bound_aggr.GetChildrenMutable()) {
+			auto ref = make_uniq<BoundReferenceExpression>(child_expr->GetReturnType(), expressions.size());
+			types.push_back(child_expr->GetReturnType());
+			expressions.push_back(std::move(child_expr));
+			child_expr = std::move(ref);
 		}
-		if (bound_aggr.filter) {
-			auto &filter = bound_aggr.filter;
-			auto ref = make_uniq<BoundReferenceExpression>(filter->return_type, expressions.size());
-			types.push_back(filter->return_type);
+		if (bound_aggr.GetFilter()) {
+			auto &filter = bound_aggr.GetFilterMutable();
+			auto ref = make_uniq<BoundReferenceExpression>(filter->GetReturnType(), expressions.size());
+			types.push_back(filter->GetReturnType());
 			expressions.push_back(std::move(filter));
-			bound_aggr.filter = std::move(ref);
+			bound_aggr.GetFilterMutable() = std::move(ref);
 		}
 	}
 	if (expressions.empty()) {
 		return child;
 	}
-	auto projection =
-	    make_uniq<PhysicalProjection>(std::move(types), std::move(expressions), child->estimated_cardinality);
-	projection->children.push_back(std::move(child));
-	return std::move(projection);
+	auto &proj = Make<PhysicalProjection>(std::move(types), std::move(expressions), child.estimated_cardinality);
+	proj.children.push_back(child);
+	return proj;
 }
 
 } // namespace duckdb

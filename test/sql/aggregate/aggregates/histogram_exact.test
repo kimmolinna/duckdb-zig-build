@@ -3,9 +3,6 @@
 # group: [aggregates]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE obs(n BIGINT);
 
 statement ok
@@ -34,7 +31,7 @@ SELECT histogram_exact((date '2000-01-01' + interval (n) days)::date, [date '200
 query I
 SELECT histogram_exact(n::varchar, [10, 20, 30, 40, 50]) FROM obs
 ----
-{10=0, 20=1, 30=0, 40=0, 50=0, =14}
+{10=0, 20=1, 30=0, 40=0, 50=0, ''=14}
 
 # for lists it is an empty list
 query I

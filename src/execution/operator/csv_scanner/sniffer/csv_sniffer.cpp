@@ -3,7 +3,7 @@
 
 namespace duckdb {
 
-CSVSniffer::CSVSniffer(CSVReaderOptions &options_p, const MultiFileReaderOptions &file_options,
+CSVSniffer::CSVSniffer(CSVReaderOptions &options_p, const MultiFileOptions &file_options,
                        shared_ptr<CSVBufferManager> buffer_manager_p, CSVStateMachineCache &state_machine_cache_p,
                        bool default_null_to_varchar_p)
     : state_machine_cache(state_machine_cache_p), options(options_p), file_options(file_options),
@@ -14,27 +14,13 @@ CSVSniffer::CSVSniffer(CSVReaderOptions &options_p, const MultiFileReaderOptions
 		auto &logical_type = format_template.first;
 		best_format_candidates[logical_type].clear();
 	}
-	// Initialize max columns found to either 0 or however many were set
+	// Initialize max columns found to either 0, or however many were set
 	max_columns_found = set_columns.Size();
 	error_handler = make_shared_ptr<CSVErrorHandler>(options.ignore_errors.GetValue());
 	detection_error_handler = make_shared_ptr<CSVErrorHandler>(true);
 	if (options.columns_set) {
 		set_columns = SetColumns(&options.sql_type_list, &options.name_list);
 	}
-}
-
-bool SetColumns::IsSet() const {
-	if (!types) {
-		return false;
-	}
-	return !types->empty();
-}
-
-idx_t SetColumns::Size() const {
-	if (!types) {
-		return 0;
-	}
-	return types->size();
 }
 
 template <class T>
@@ -136,7 +122,7 @@ AdaptiveSnifferResult CSVSniffer::MinimalSniff() {
 	for (idx_t col_idx = 0; col_idx < data_chunk.ColumnCount(); col_idx++) {
 		auto &cur_vector = data_chunk.data[col_idx];
 		const auto vector_data = FlatVector::GetData<string_t>(cur_vector);
-		auto &validity = FlatVector::Validity(cur_vector);
+		auto &validity = FlatVector::ValidityMutable(cur_vector);
 		HeaderValue val;
 		if (validity.RowIsValid(0)) {
 			val = HeaderValue(vector_data[0]);
@@ -207,7 +193,8 @@ SnifferResult CSVSniffer::SniffCSV(const bool force_match) {
 		buffer_manager->ResetBufferManager();
 	}
 	buffer_manager->sniffing = false;
-	if (best_candidate->error_handler->AnyErrors() && !options.ignore_errors.GetValue()) {
+	if (best_candidate->error_handler->AnyErrors() && !options.ignore_errors.GetValue() &&
+	    best_candidate->state_machine->dialect_options.state_machine_options.strict_mode.GetValue()) {
 		best_candidate->error_handler->ErrorIfTypeExists(MAXIMUM_LINE_SIZE);
 	}
 	D_ASSERT(best_sql_types_candidates_per_column_idx.size() == names.size());

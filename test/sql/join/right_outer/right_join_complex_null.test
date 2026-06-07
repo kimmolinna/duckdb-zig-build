@@ -3,10 +3,7 @@
 # group: [right_outer]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
-pragma verify_external
+SET debug_force_external=true;
 
 statement ok
 CREATE TABLE t0(c0 DATE, PRIMARY KEY(c0));
@@ -36,3 +33,4 @@ a
 statement error
 SELECT MAX(agg0) FROM (SELECT MAX('a') AS agg0 FROM t0 RIGHT  JOIN t1 ON ((t0.c0)<=(((NULL)-(t1.rowid)))) WHERE t1.c0 UNION ALL SELECT MAX('a') AS agg0 FROM t0 RIGHT  JOIN t1 ON ((t0.c0)<=(((NULL)-(t1.rowid)))) WHERE (NOT t1.c0) UNION ALL SELECT MAX('a') AS agg0 FROM t0 RIGHT  JOIN t1 ON ((t0.c0)<=(((NULL)-(t1.rowid)))) WHERE ((t1.c0) IS NULL)) as asdf;
 ----
+<REGEX>:.*Binder Error.*Cannot compare values.*

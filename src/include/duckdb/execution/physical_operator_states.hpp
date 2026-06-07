@@ -36,6 +36,13 @@ public:
 	virtual void Finalize(const PhysicalOperator &op, ExecutionContext &context) {
 	}
 
+	virtual bool SupportsReuse() const {
+		return false;
+	}
+
+	virtual void Reset() {
+	}
+
 	template <class TARGET>
 	TARGET &Cast() {
 		DynamicCastCheck<TARGET>(this);
@@ -63,6 +70,10 @@ public:
 		DynamicCastCheck<TARGET>(this);
 		return reinterpret_cast<const TARGET &>(*this);
 	}
+
+	virtual idx_t MaxThreads(idx_t source_max_threads) {
+		return source_max_threads;
+	}
 };
 
 class GlobalSinkState : public StateWithBlockableTasks {
@@ -73,6 +84,16 @@ public:
 	}
 
 	SinkFinalizeType state;
+
+	virtual bool SupportsReuse() const {
+		return false;
+	}
+
+	virtual void Reset(ClientContext &context) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		ResetBlocking();
+		state = SinkFinalizeType::READY;
+	}
 
 	template <class TARGET>
 	TARGET &Cast() {
@@ -98,6 +119,13 @@ public:
 	//! Source partition info
 	SourcePartitionInfo partition_info;
 
+	virtual bool SupportsReuse() const {
+		return false;
+	}
+
+	virtual void Reset(ExecutionContext &context, GlobalSinkState &gstate) {
+	}
+
 	template <class TARGET>
 	TARGET &Cast() {
 		DynamicCastCheck<TARGET>(this);
@@ -119,6 +147,15 @@ public:
 		return 1;
 	}
 
+	virtual bool SupportsReuse() const {
+		return false;
+	}
+
+	virtual void Reset(ClientContext &context) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		ResetBlocking();
+	}
+
 	template <class TARGET>
 	TARGET &Cast() {
 		DynamicCastCheck<TARGET>(this);
@@ -134,6 +171,13 @@ public:
 class LocalSourceState {
 public:
 	virtual ~LocalSourceState() {
+	}
+
+	virtual bool SupportsReuse() const {
+		return false;
+	}
+
+	virtual void Reset(ExecutionContext &context, GlobalSourceState &gstate) {
 	}
 
 	template <class TARGET>
@@ -168,6 +212,11 @@ struct OperatorSinkCombineInput {
 
 struct OperatorSinkFinalizeInput {
 	GlobalSinkState &global_state;
+	InterruptState &interrupt_state;
+};
+
+struct OperatorFinalizeInput {
+	GlobalOperatorState &global_state;
 	InterruptState &interrupt_state;
 };
 

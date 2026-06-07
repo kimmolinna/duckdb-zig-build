@@ -31,16 +31,19 @@ create_logical_type(::Type{T}) where {T <: Int8} = DuckDB.LogicalType(DuckDB.DUC
 create_logical_type(::Type{T}) where {T <: Int16} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_SMALLINT)
 create_logical_type(::Type{T}) where {T <: Int32} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_INTEGER)
 create_logical_type(::Type{T}) where {T <: Int64} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_BIGINT)
+create_logical_type(::Type{T}) where {T <: Int128} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_HUGEINT)
 create_logical_type(::Type{T}) where {T <: UInt8} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_UTINYINT)
 create_logical_type(::Type{T}) where {T <: UInt16} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_USMALLINT)
 create_logical_type(::Type{T}) where {T <: UInt32} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_UINTEGER)
 create_logical_type(::Type{T}) where {T <: UInt64} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_UBIGINT)
+create_logical_type(::Type{T}) where {T <: UInt128} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_UHUGEINT)
 create_logical_type(::Type{T}) where {T <: Float32} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_FLOAT)
 create_logical_type(::Type{T}) where {T <: Float64} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_DOUBLE)
 create_logical_type(::Type{T}) where {T <: Date} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_DATE)
 create_logical_type(::Type{T}) where {T <: Time} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_TIME)
 create_logical_type(::Type{T}) where {T <: DateTime} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_TIMESTAMP)
 create_logical_type(::Type{T}) where {T <: AbstractString} = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_VARCHAR)
+create_logical_type(::Type{Vector{UInt8}}) = DuckDB.LogicalType(DuckDB.DUCKDB_TYPE_BLOB)
 function create_logical_type(::Type{T}) where {T <: FixedDecimal}
     int_type = T.parameters[1]
     width = 0
@@ -95,6 +98,18 @@ end
 
 function get_list_child_type(type::LogicalType)
     return LogicalType(duckdb_list_type_child_type(type.handle))
+end
+
+##===--------------------------------------------------------------------===##
+## Array methods
+##===--------------------------------------------------------------------===##
+
+function get_array_child_type(type::LogicalType)
+    return LogicalType(duckdb_array_type_child_type(type.handle))
+end
+
+function get_array_size(type::LogicalType)
+    return duckdb_array_type_array_size(type.handle)
 end
 
 ##===--------------------------------------------------------------------===##

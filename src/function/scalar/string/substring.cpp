@@ -16,7 +16,6 @@ static const int64_t SUPPORTED_UPPER_BOUND = NumericLimits<uint32_t>::Maximum();
 static const int64_t SUPPORTED_LOWER_BOUND = -SUPPORTED_UPPER_BOUND - 1;
 
 static inline void AssertInSupportedRange(idx_t input_size, int64_t offset, int64_t length) {
-
 	if (input_size > (uint64_t)SUPPORTED_UPPER_BOUND) {
 		throw OutOfRangeException("Substring input size is too large (> %d)", SUPPORTED_UPPER_BOUND);
 	}
@@ -34,13 +33,13 @@ static inline void AssertInSupportedRange(idx_t input_size, int64_t offset, int6
 	}
 }
 
-string_t SubstringEmptyString(Vector &result) {
+static string_t SubstringEmptyString(Vector &result) {
 	auto result_string = StringVector::EmptyString(result, 0);
 	result_string.Finalize();
 	return result_string;
 }
 
-string_t SubstringSlice(Vector &result, const char *input_data, int64_t offset, int64_t length) {
+static string_t SubstringSlice(Vector &result, const char *input_data, int64_t offset, int64_t length) {
 	auto result_string = StringVector::EmptyString(result, UnsafeNumericCast<idx_t>(length));
 	auto result_data = result_string.GetDataWriteable();
 	memcpy(result_data, input_data + offset, UnsafeNumericCast<size_t>(length));
@@ -49,7 +48,7 @@ string_t SubstringSlice(Vector &result, const char *input_data, int64_t offset, 
 }
 
 // compute start and end characters from the given input size and offset/length
-bool SubstringStartEnd(int64_t input_size, int64_t offset, int64_t length, int64_t &start, int64_t &end) {
+static bool SubstringStartEnd(int64_t input_size, int64_t offset, int64_t length, int64_t &start, int64_t &end) {
 	if (length == 0) {
 		return false;
 	}
@@ -250,6 +249,8 @@ string_t SubstringGrapheme(Vector &result, string_t input, int64_t offset, int64
 	                      UnsafeNumericCast<int64_t>(end_pos - start_pos));
 }
 
+namespace {
+
 struct SubstringUnicodeOp {
 	static string_t Substring(Vector &result, string_t input, int64_t offset, int64_t length) {
 		return SubstringUnicode(result, input, offset, length);
@@ -263,63 +264,64 @@ struct SubstringGraphemeOp {
 };
 
 template <class OP>
-static void SubstringFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &input_vector = args.data[0];
-	auto &offset_vector = args.data[1];
+void SubstringFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	const auto &input_vector = args.data[0];
+	const auto &offset_vector = args.data[1];
 	if (args.ColumnCount() == 3) {
-		auto &length_vector = args.data[2];
+		const auto &length_vector = args.data[2];
 
 		TernaryExecutor::Execute<string_t, int64_t, int64_t, string_t>(
-		    input_vector, offset_vector, length_vector, result, args.size(),
+		    input_vector, offset_vector, length_vector, result,
 		    [&](string_t input_string, int64_t offset, int64_t length) {
 			    return OP::Substring(result, input_string, offset, length);
 		    });
 	} else {
 		BinaryExecutor::Execute<string_t, int64_t, string_t>(
-		    input_vector, offset_vector, result, args.size(), [&](string_t input_string, int64_t offset) {
+		    input_vector, offset_vector, result, [&](string_t input_string, int64_t offset) {
 			    return OP::Substring(result, input_string, offset, NumericLimits<uint32_t>::Maximum());
 		    });
 	}
 }
 
-static void SubstringFunctionASCII(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &input_vector = args.data[0];
-	auto &offset_vector = args.data[1];
+void SubstringFunctionASCII(DataChunk &args, ExpressionState &state, Vector &result) {
+	const auto &input_vector = args.data[0];
+	const auto &offset_vector = args.data[1];
 	if (args.ColumnCount() == 3) {
-		auto &length_vector = args.data[2];
+		const auto &length_vector = args.data[2];
 
 		TernaryExecutor::Execute<string_t, int64_t, int64_t, string_t>(
-		    input_vector, offset_vector, length_vector, result, args.size(),
+		    input_vector, offset_vector, length_vector, result,
 		    [&](string_t input_string, int64_t offset, int64_t length) {
 			    return SubstringASCII(result, input_string, offset, length);
 		    });
 	} else {
 		BinaryExecutor::Execute<string_t, int64_t, string_t>(
-		    input_vector, offset_vector, result, args.size(), [&](string_t input_string, int64_t offset) {
+		    input_vector, offset_vector, result, [&](string_t input_string, int64_t offset) {
 			    return SubstringASCII(result, input_string, offset, NumericLimits<uint32_t>::Maximum());
 		    });
 	}
 }
 
-static unique_ptr<BaseStatistics> SubstringPropagateStats(ClientContext &context, FunctionStatisticsInput &input) {
+unique_ptr<BaseStatistics> SubstringPropagateStats(ClientContext &context, FunctionStatisticsInput &input) {
 	auto &child_stats = input.child_stats;
 	auto &expr = input.expr;
 	// can only propagate stats if the children have stats
 	// we only care about the stats of the first child (i.e. the string)
 	if (!StringStats::CanContainUnicode(child_stats[0])) {
-		expr.function.function = SubstringFunctionASCII;
+		expr.FunctionMutable().SetFunctionCallback(SubstringFunctionASCII);
 	}
 	return nullptr;
 }
 
+} // namespace
+
 ScalarFunctionSet SubstringFun::GetFunctions() {
 	ScalarFunctionSet substr("substring");
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
-	                                  LogicalType::VARCHAR, SubstringFunction<SubstringUnicodeOp>, nullptr, nullptr,
+	                                  LogicalType::VARCHAR, SubstringFunction<SubstringUnicodeOp>, nullptr,
 	                                  SubstringPropagateStats));
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR,
-	                                  SubstringFunction<SubstringUnicodeOp>, nullptr, nullptr,
-	                                  SubstringPropagateStats));
+	                                  SubstringFunction<SubstringUnicodeOp>, nullptr, SubstringPropagateStats));
 	return (substr);
 }
 
@@ -327,9 +329,9 @@ ScalarFunctionSet SubstringGraphemeFun::GetFunctions() {
 	ScalarFunctionSet substr_grapheme("substring_grapheme");
 	substr_grapheme.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
 	                                           LogicalType::VARCHAR, SubstringFunction<SubstringGraphemeOp>, nullptr,
-	                                           nullptr, SubstringPropagateStats));
+	                                           SubstringPropagateStats));
 	substr_grapheme.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR,
-	                                           SubstringFunction<SubstringGraphemeOp>, nullptr, nullptr,
+	                                           SubstringFunction<SubstringGraphemeOp>, nullptr,
 	                                           SubstringPropagateStats));
 	return (substr_grapheme);
 }

@@ -48,10 +48,6 @@ unique_ptr<StringValueScanner> CSVGlobalState::Next(shared_ptr<CSVFileScan> &cur
 		// initialize the boundary for this file
 		current_boundary = current_file.start_iterator;
 		current_boundary.SetCurrentBoundaryToPosition(single_threaded, current_file.options);
-		if (current_boundary.done && context.client_data->debug_set_max_line_length) {
-			context.client_data->debug_max_line_length =
-			    MaxValue<idx_t>(context.client_data->debug_max_line_length, current_boundary.pos.buffer_pos);
-		}
 		current_buffer_in_use =
 		    make_shared_ptr<CSVBufferUsage>(*current_file.buffer_manager, current_boundary.GetBufferIdx());
 		initialized = true;
@@ -72,6 +68,7 @@ unique_ptr<StringValueScanner> CSVGlobalState::Next(shared_ptr<CSVFileScan> &cur
 	auto csv_scanner =
 	    make_uniq<StringValueScanner>(scanner_idx++, current_file.buffer_manager, current_file.state_machine,
 	                                  current_file.error_handler, current_file_ptr, false, current_boundary);
+
 	csv_scanner->buffer_tracker = current_buffer_in_use;
 	// We initialize the scan
 	return csv_scanner;
@@ -99,10 +96,6 @@ void CSVGlobalState::FinishFile(CSVFileScan &scan) {
 	}
 	scan.error_handler->ErrorIfAny();
 	FillRejectsTable(scan);
-	if (context.client_data->debug_set_max_line_length) {
-		context.client_data->debug_max_line_length =
-		    MaxValue<idx_t>(context.client_data->debug_max_line_length, scan.error_handler->GetMaxLineLength());
-	}
 }
 
 void FillScanErrorTable(InternalAppender &scan_appender, idx_t scan_idx, idx_t file_idx, CSVFileScan &file) {
@@ -179,7 +172,7 @@ void CSVGlobalState::FillRejectsTable(CSVFileScan &scan) {
 	auto limit = options.rejects_limit;
 	auto rejects = CSVRejectsTable::GetOrCreate(context, options.rejects_scan_name.GetValue(),
 	                                            options.rejects_table_name.GetValue());
-	lock_guard<mutex> lock(rejects->write_lock);
+	const lock_guard<mutex> lock(rejects->write_lock);
 	auto &errors_table = rejects->GetErrorsTable(context);
 	auto &scans_table = rejects->GetScansTable(context);
 	InternalAppender errors_appender(context, errors_table);

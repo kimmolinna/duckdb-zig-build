@@ -18,6 +18,7 @@ add_library_unity(
   logical_distinct.cpp
   logical_dummy_scan.cpp
   logical_empty_result.cpp
+  logical_explain.cpp
   logical_export.cpp
   logical_expression_get.cpp
   logical_extension_operator.cpp
@@ -26,6 +27,7 @@ add_library_unity(
   logical_insert.cpp
   logical_join.cpp
   logical_limit.cpp
+  logical_merge_into.cpp
   logical_order.cpp
   logical_pivot.cpp
   logical_positional_join.cpp

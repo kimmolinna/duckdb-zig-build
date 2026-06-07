@@ -4,9 +4,6 @@
 
 require icu
 
-statement ok
-PRAGMA enable_verification
-
 # Normalise the testing locale
 statement ok
 SET Calendar = 'gregorian';
@@ -201,6 +198,7 @@ CREATE TABLE timeparts AS (
 		tz
 	FROM timestamps t
 	LEFT JOIN timezones z ON (month(t.ts) = z.mm)
+	ORDER BY ts
 );
 
 query IIIIIIII

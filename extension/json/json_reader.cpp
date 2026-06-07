@@ -1,10 +1,13 @@
 #include "json_reader.hpp"
 
+#include <utility>
+
 #include "duckdb/common/file_opener.hpp"
+#include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/storage/caching_mode.hpp"
 #include "json_scan.hpp"
-#include <utility>
 
 namespace duckdb {
 
@@ -14,10 +17,10 @@ JSONBufferHandle::JSONBufferHandle(JSONReader &reader, idx_t buffer_index_p, idx
       buffer_size(buffer_size_p), buffer_start(buffer_start_p) {
 }
 
-JSONFileHandle::JSONFileHandle(unique_ptr<FileHandle> file_handle_p, Allocator &allocator_p)
-    : file_handle(std::move(file_handle_p)), allocator(allocator_p), can_seek(file_handle->CanSeek()),
-      file_size(file_handle->GetFileSize()), read_position(0), requested_reads(0), actual_reads(0),
-      last_read_requested(false), cached_size(0) {
+JSONFileHandle::JSONFileHandle(QueryContext context_p, unique_ptr<FileHandle> file_handle_p, Allocator &allocator_p)
+    : context(context_p), file_handle(std::move(file_handle_p)), allocator(allocator_p),
+      can_seek(file_handle->CanSeek()), file_size(file_handle->GetFileSize()), read_position(0), requested_reads(0),
+      actual_reads(0), last_read_requested(false), cached_size(0) {
 }
 
 bool JSONFileHandle::IsOpen() const {
@@ -37,7 +40,7 @@ void JSONFileHandle::Reset() {
 	requested_reads = 0;
 	actual_reads = 0;
 	last_read_requested = false;
-	if (IsOpen() && !file_handle->IsPipe()) {
+	if (IsOpen() && !IsPipe()) {
 		file_handle->Reset();
 	}
 }
@@ -90,25 +93,12 @@ bool JSONFileHandle::GetPositionAndSize(idx_t &position, idx_t &size, idx_t requ
 
 void JSONFileHandle::ReadAtPosition(char *pointer, idx_t size, idx_t position,
                                     optional_ptr<FileHandle> override_handle) {
+	if (IsPipe()) {
+		throw InternalException("ReadAtPosition is not supported for pipes");
+	}
 	if (size != 0) {
 		auto &handle = override_handle ? *override_handle.get() : *file_handle.get();
-		if (can_seek) {
-			handle.Read(pointer, size, position);
-		} else if (file_handle->IsPipe()) { // Cache the buffer
-			handle.Read(pointer, size, position);
-
-			cached_buffers.emplace_back(allocator.Allocate(size));
-			memcpy(cached_buffers.back().get(), pointer, size);
-			cached_size += size;
-		} else {
-			if (!cached_buffers.empty() || position < cached_size) {
-				ReadFromCache(pointer, size, position);
-			}
-
-			if (size != 0) {
-				handle.Read(pointer, size, position);
-			}
-		}
+		handle.Read(context, pointer, size, position);
 	}
 
 	const auto incremented_actual_reads = ++actual_reads;
@@ -127,26 +117,19 @@ bool JSONFileHandle::Read(char *pointer, idx_t &read_size, idx_t requested_size)
 		return false;
 	}
 
-	if (can_seek) {
-		read_size = ReadInternal(pointer, requested_size);
-		read_position += read_size;
-	} else if (file_handle->IsPipe()) { // Cache the buffer
-		read_size = ReadInternal(pointer, requested_size);
-		if (read_size > 0) {
-			cached_buffers.emplace_back(allocator.Allocate(read_size));
-			memcpy(cached_buffers.back().get(), pointer, read_size);
-		}
-		cached_size += read_size;
-		read_position += read_size;
-	} else {
-		read_size = 0;
-		if (!cached_buffers.empty() || read_position < cached_size) {
-			read_size += ReadFromCache(pointer, requested_size, read_position);
-		}
-		if (requested_size != 0) {
-			read_size += ReadInternal(pointer, requested_size);
-		}
+	read_size = 0;
+	if (!cached_buffers.empty() || read_position < cached_size) {
+		read_size += ReadFromCache(pointer, requested_size, read_position);
 	}
+
+	auto temp_read_size = ReadInternal(pointer, requested_size);
+	if (IsPipe() && temp_read_size != 0) { // Cache the buffer
+		cached_buffers.emplace_back(allocator.Allocate(temp_read_size));
+		memcpy(cached_buffers.back().get(), pointer, temp_read_size);
+		cached_size += temp_read_size;
+	}
+	read_position += temp_read_size;
+	read_size += temp_read_size;
 
 	if (read_size == 0) {
 		last_read_requested = true;
@@ -168,7 +151,7 @@ idx_t JSONFileHandle::ReadInternal(char *pointer, const idx_t requested_size) {
 	return total_read_size;
 }
 
-idx_t JSONFileHandle::ReadFromCache(char *&pointer, idx_t &size, idx_t &position) {
+idx_t JSONFileHandle::ReadFromCache(char *&pointer, idx_t &size, atomic<idx_t> &position) {
 	idx_t read_size = 0;
 	idx_t total_offset = 0;
 
@@ -194,8 +177,8 @@ idx_t JSONFileHandle::ReadFromCache(char *&pointer, idx_t &size, idx_t &position
 	return read_size;
 }
 
-JSONReader::JSONReader(ClientContext &context, JSONReaderOptions options_p, string file_name_p)
-    : BaseFileReader(std::move(file_name_p)), context(context), options(std::move(options_p)), initialized(0),
+JSONReader::JSONReader(ClientContext &context, JSONReaderOptions options_p, OpenFileInfo file_p)
+    : BaseFileReader(std::move(file_p)), context(context), options(std::move(options_p)), initialized(0),
       next_buffer_index(0), thrown(false) {
 }
 
@@ -203,8 +186,10 @@ void JSONReader::OpenJSONFile() {
 	lock_guard<mutex> guard(lock);
 	if (!IsOpen()) {
 		auto &fs = FileSystem::GetFileSystem(context);
-		auto regular_file_handle = fs.OpenFile(file_name, FileFlags::FILE_FLAGS_READ | options.compression);
-		file_handle = make_uniq<JSONFileHandle>(std::move(regular_file_handle), BufferAllocator::Get(context));
+		FileOpenFlags flags = FileFlags::FILE_FLAGS_READ | options.compression;
+		flags.SetCachingMode(CachingMode::CACHE_REMOTE_ONLY);
+		auto regular_file_handle = fs.OpenFile(file, flags);
+		file_handle = make_uniq<JSONFileHandle>(context, std::move(regular_file_handle), BufferAllocator::Get(context));
 	}
 	Reset();
 }
@@ -262,7 +247,7 @@ void JSONReader::SetRecordType(duckdb::JSONRecordType type) {
 }
 
 const string &JSONReader::GetFileName() const {
-	return file_name;
+	return file.path;
 }
 
 JSONFileHandle &JSONReader::GetFileHandle() const {
@@ -310,8 +295,8 @@ void JSONReader::SetBufferLineOrObjectCount(JSONBufferHandle &handle, idx_t coun
 void JSONReader::AddParseError(JSONReaderScanState &scan_state, idx_t line_or_object_in_buf, yyjson_read_err &err,
                                const string &extra) {
 	string unit = options.format == JSONFormat::NEWLINE_DELIMITED ? "line" : "record/value";
-	auto error_msg = StringUtil::Format("Malformed JSON in file \"%s\", at byte %llu in %s {line}: %s. %s", file_name,
-	                                    err.pos + 1, unit, err.msg, extra);
+	auto error_msg = StringUtil::Format("Malformed JSON in file \"%s\", at byte %llu in %s {line}: %s. %s",
+	                                    GetFileName(), err.pos + 1, unit, err.msg, extra);
 	lock_guard<mutex> guard(lock);
 	AddError(scan_state.current_buffer_handle->buffer_index, line_or_object_in_buf + 1, error_msg);
 	ThrowErrorsIfPossible();
@@ -326,7 +311,7 @@ void JSONReader::AddTransformError(JSONReaderScanState &scan_state, idx_t object
 	auto line_or_object_in_buffer = scan_state.lines_or_objects_in_buffer - scan_state.scan_count + object_index;
 	string unit = options.format == JSONFormat::NEWLINE_DELIMITED ? "line" : "record/value";
 	auto error_msg =
-	    StringUtil::Format("JSON transform error in file \"%s\", in %s {line}: %s", file_name, unit, error_message);
+	    StringUtil::Format("JSON transform error in file \"%s\", in %s {line}: %s", GetFileName(), unit, error_message);
 	lock_guard<mutex> guard(lock);
 	AddError(scan_state.current_buffer_handle->buffer_index, line_or_object_in_buffer, error_msg);
 	ThrowErrorsIfPossible();
@@ -388,11 +373,14 @@ bool JSONReader::HasThrown() {
 
 double JSONReader::GetProgress() const {
 	lock_guard<mutex> guard(lock);
-	if (HasFileHandle()) {
-		return 100.0 - 100.0 * double(file_handle->Remaining()) / double(file_handle->FileSize());
-	} else {
+	if (!HasFileHandle()) {
 		return 0;
 	}
+	const auto file_size = file_handle->FileSize();
+	if (file_size == 0) {
+		return 0;
+	}
+	return 100.0 - 100.0 * double(file_handle->Remaining()) / double(file_size);
 }
 
 static inline void TrimWhitespace(JSONString &line) {
@@ -635,7 +623,7 @@ static pair<JSONFormat, JSONRecordType> DetectFormatAndRecordType(char *const bu
 	return make_pair(JSONFormat::ARRAY, JSONRecordType::VALUES);
 }
 
-void JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_start, const idx_t json_size,
+bool JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_start, const idx_t json_size,
                            const idx_t remaining) {
 	yyjson_doc *doc;
 	yyjson_read_err err;
@@ -657,7 +645,7 @@ void JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_sta
 		}
 		if (!can_ignore_this_error) {
 			AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err, extra);
-			return;
+			return false;
 		}
 	}
 
@@ -669,7 +657,7 @@ void JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_sta
 		err.msg = "unexpected end of data";
 		err.pos = json_size;
 		AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err, "Try auto-detecting the JSON format");
-		return;
+		return false;
 	} else if (!options.ignore_errors && read_size < json_size) {
 		idx_t off = read_size;
 		idx_t rem = json_size;
@@ -679,20 +667,21 @@ void JSONReader::ParseJSON(JSONReaderScanState &scan_state, char *const json_sta
 			err.msg = "unexpected content after document";
 			err.pos = read_size;
 			AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err, "Try auto-detecting the JSON format");
-			return;
+			return false;
 		}
 	}
 
 	scan_state.lines_or_objects_in_buffer++;
 	if (!doc) {
 		scan_state.values[scan_state.scan_count] = nullptr;
-		return;
+		return true;
 	}
 
 	// Set the JSONLine and trim
 	scan_state.units[scan_state.scan_count] = JSONString(json_start, json_size);
 	TrimWhitespace(scan_state.units[scan_state.scan_count]);
 	scan_state.values[scan_state.scan_count] = doc->root;
+	return true;
 }
 
 void JSONReader::AutoDetect(Allocator &allocator, idx_t buffer_capacity) {
@@ -721,11 +710,16 @@ void JSONReader::AutoDetect(Allocator &allocator, idx_t buffer_capacity) {
 	    GetRecordType() != JSONRecordType::RECORDS) {
 		string unit = options.format == JSONFormat::NEWLINE_DELIMITED ? "line" : "record/value";
 		throw InvalidInputException(
-		    "JSON auto-detection error in file \"%s\": Expected records, detected non-record JSON instead", file_name);
+		    "JSON auto-detection error in file \"%s\": Expected records, detected non-record JSON instead",
+		    GetFileName());
 	}
 	// store the buffer in the file so it can be re-used by the first reader of the file
-	auto_detect_data = std::move(read_buffer);
-	auto_detect_data_size = read_size;
+	if (!file_handle->IsPipe()) {
+		auto_detect_data = std::move(read_buffer);
+		auto_detect_data_size = read_size;
+	} else {
+		file_handle->Reset();
+	}
 }
 
 void JSONReader::ThrowObjectSizeError(const idx_t object_size) {
@@ -752,7 +746,7 @@ bool JSONReader::CopyRemainderFromPreviousBuffer(JSONReaderScanState &scan_state
 	idx_t prev_buffer_size = previous_buffer_handle->buffer_size - previous_buffer_handle->buffer_start;
 	auto prev_buffer_ptr = char_ptr_cast(previous_buffer_handle->buffer.get()) + previous_buffer_handle->buffer_size;
 	auto prev_object_start = PreviousNewline(prev_buffer_ptr, prev_buffer_size);
-	auto prev_object_size = prev_buffer_ptr - prev_object_start;
+	auto prev_object_size = NumericCast<idx_t>(prev_buffer_ptr - prev_object_start);
 
 	D_ASSERT(scan_state.buffer_offset == options.maximum_object_size);
 	if (prev_object_size > scan_state.buffer_offset) {
@@ -774,7 +768,7 @@ bool JSONReader::CopyRemainderFromPreviousBuffer(JSONReaderScanState &scan_state
 	return true;
 }
 
-void JSONReader::ParseNextChunk(JSONReaderScanState &scan_state) {
+bool JSONReader::ParseNextChunk(JSONReaderScanState &scan_state) {
 	const auto format = GetFormat();
 	auto &buffer_ptr = scan_state.buffer_ptr;
 	auto &buffer_offset = scan_state.buffer_offset;
@@ -808,7 +802,9 @@ void JSONReader::ParseNextChunk(JSONReaderScanState &scan_state) {
 		}
 
 		idx_t json_size = json_end - json_start;
-		ParseJSON(scan_state, json_start, json_size, remaining);
+		if (!ParseJSON(scan_state, json_start, json_size, remaining)) {
+			return false;
+		}
 		buffer_offset += json_size;
 
 		if (format == JSONFormat::ARRAY) {
@@ -821,11 +817,12 @@ void JSONReader::ParseNextChunk(JSONReaderScanState &scan_state) {
 				err.msg = "unexpected character";
 				err.pos = json_size;
 				AddParseError(scan_state, scan_state.lines_or_objects_in_buffer, err);
-				return;
+				return false;
 			}
 		}
 		SkipWhitespace(buffer_ptr, buffer_offset, buffer_size);
 	}
+	return true;
 }
 
 void JSONReader::Initialize(Allocator &allocator, idx_t buffer_size) {
@@ -880,7 +877,10 @@ idx_t JSONReader::Scan(JSONReaderScanState &scan_state) {
 				return 0;
 			}
 		}
-		ParseNextChunk(scan_state);
+		if (!ParseNextChunk(scan_state)) {
+			// found an error but we can't handle it - return
+			return 0;
+		}
 	}
 	return scan_state.scan_count;
 }
@@ -919,8 +919,11 @@ void JSONReader::FinalizeBuffer(JSONReaderScanState &scan_state) {
 	// we read something
 	// skip over the array start if required
 	if (!scan_state.is_last) {
-		if (scan_state.buffer_index.GetIndex() == 0 && GetFormat() == JSONFormat::ARRAY) {
-			SkipOverArrayStart(scan_state);
+		if (scan_state.buffer_index.GetIndex() == 0) {
+			StringUtil::SkipBOM(scan_state.buffer_ptr, scan_state.buffer_size, scan_state.buffer_offset);
+			if (GetFormat() == JSONFormat::ARRAY) {
+				SkipOverArrayStart(scan_state);
+			}
 		}
 	}
 	// then finalize the buffer
@@ -1054,8 +1057,9 @@ void JSONReader::ReadNextBufferSeek(JSONReaderScanState &scan_state) {
 			if (!raw_handle.OnDiskFile() && raw_handle.CanSeek()) {
 				if (!scan_state.thread_local_filehandle ||
 				    scan_state.thread_local_filehandle->GetPath() != raw_handle.GetPath()) {
-					scan_state.thread_local_filehandle = scan_state.fs.OpenFile(
-					    raw_handle.GetPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+					FileOpenFlags flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO;
+					flags.SetCachingMode(CachingMode::CACHE_REMOTE_ONLY);
+					scan_state.thread_local_filehandle = scan_state.fs.OpenFile(raw_handle.GetPath(), flags);
 				}
 			} else if (scan_state.thread_local_filehandle) {
 				scan_state.thread_local_filehandle = nullptr;

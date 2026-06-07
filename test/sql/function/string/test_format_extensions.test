@@ -2,9 +2,6 @@
 # description: Test format extensions
 # group: [string]
 
-statement ok
-PRAGMA enable_verification
-
 # thousands separator
 query I
 select printf('%,d', 123456789)
@@ -16,11 +13,21 @@ select format('{:d}', 123456789)
 ----
 123456789
 
+query I
+select printf('%,d', 123456789123456789123456789::HUGEINT)
+----
+123,456,789,123,456,789,123,456,789
+
 # other supported thousand separators
 query I
 select printf('%.d', 123456789)
 ----
 123.456.789
+
+query I
+select printf('%.d', -123456789123456789123456789::HUGEINT)
+----
+-123.456.789.123.456.789.123.456.789
 
 query I
 select printf('%_d', 123456789)
@@ -52,6 +59,11 @@ query I
 select format('{:''}', 123456789)
 ----
 123'456'789
+
+query I
+select format('{:,}', 123456789123456789123456789::UHUGEINT)
+----
+123,456,789,123,456,789,123,456,789
 
 # custom thousand separator
 query I
@@ -88,7 +100,7 @@ select printf('%,.3f', 123456.789::DOUBLE)
 foreach val 1.724e12 1.7e12 1.72456e12 1.723456e11 1.724567e12 1.234e4
 
 query I
-select printf('%,.f', ${val}::double) = printf('%,d', ${val}::bigint);
+select printf('%,.f', {val}::double) = printf('%,d', {val}::bigint);
 ----
 true
 

@@ -1,15 +1,41 @@
 #include "reader/expression_column_reader.hpp"
+
+#include <utility>
+
 #include "parquet_reader.hpp"
+#include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+
+namespace duckdb_apache {
+namespace thrift {
+namespace protocol {
+class TProtocol;
+} // namespace protocol
+} // namespace thrift
+} // namespace duckdb_apache
+namespace duckdb_parquet {
+class ColumnChunk;
+} // namespace duckdb_parquet
 
 namespace duckdb {
+class ClientContext;
 
 //===--------------------------------------------------------------------===//
 // Expression Column Reader
 //===--------------------------------------------------------------------===//
 ExpressionColumnReader::ExpressionColumnReader(ClientContext &context, unique_ptr<ColumnReader> child_reader_p,
-                                               unique_ptr<Expression> expr_p)
-    : ColumnReader(child_reader_p->Reader(), child_reader_p->Schema()), child_reader(std::move(child_reader_p)),
+                                               unique_ptr<Expression> expr_p, const ParquetColumnSchema &schema_p)
+    : ColumnReader(child_reader_p->Reader(), schema_p), child_reader(std::move(child_reader_p)),
       expr(std::move(expr_p)), executor(context, expr.get()) {
+	vector<LogicalType> intermediate_types {child_reader->Type()};
+	intermediate_chunk.Initialize(reader.allocator, intermediate_types);
+}
+
+ExpressionColumnReader::ExpressionColumnReader(ClientContext &context, unique_ptr<ColumnReader> child_reader_p,
+                                               unique_ptr<Expression> expr_p,
+                                               unique_ptr<ParquetColumnSchema> owned_schema_p)
+    : ColumnReader(child_reader_p->Reader(), *owned_schema_p), child_reader(std::move(child_reader_p)),
+      expr(std::move(expr_p)), executor(context, expr.get()), owned_schema(std::move(owned_schema_p)) {
 	vector<LogicalType> intermediate_types {child_reader->Type()};
 	intermediate_chunk.Initialize(reader.allocator, intermediate_types);
 }
@@ -19,13 +45,13 @@ void ExpressionColumnReader::InitializeRead(idx_t row_group_idx_p, const vector<
 	child_reader->InitializeRead(row_group_idx_p, columns, protocol_p);
 }
 
-idx_t ExpressionColumnReader::Read(uint64_t num_values, data_ptr_t define_out, data_ptr_t repeat_out, Vector &result) {
+idx_t ExpressionColumnReader::Read(ColumnReaderInput &input, Vector &result) {
 	intermediate_chunk.Reset();
 	auto &intermediate_vector = intermediate_chunk.data[0];
 
-	auto amount = child_reader->Read(num_values, define_out, repeat_out, intermediate_vector);
+	auto amount = child_reader->Read(input, intermediate_vector);
 	// Execute the expression
-	intermediate_chunk.SetCardinality(amount);
+	intermediate_chunk.SetChildCardinality(amount);
 	executor.ExecuteExpression(intermediate_chunk, result);
 	return amount;
 }

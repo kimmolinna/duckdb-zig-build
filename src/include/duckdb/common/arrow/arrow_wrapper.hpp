@@ -33,13 +33,22 @@ public:
 	ArrowArrayWrapper(ArrowArrayWrapper &&other) noexcept : arrow_array(other.arrow_array) {
 		other.arrow_array.release = nullptr;
 	}
+	ArrowArrayWrapper &operator=(ArrowArrayWrapper &&other) noexcept {
+		if (this != &other) {
+			if (arrow_array.release) {
+				arrow_array.release(&arrow_array);
+			}
+			arrow_array = other.arrow_array;
+			other.arrow_array.release = nullptr;
+		}
+		return *this;
+	}
 	~ArrowArrayWrapper();
 };
 
 class ArrowArrayStreamWrapper {
 public:
 	ArrowArrayStream arrow_array_stream;
-	int64_t number_of_rows;
 
 public:
 	void GetSchema(ArrowSchemaWrapper &schema);

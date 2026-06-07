@@ -8,12 +8,27 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+#include <string>
+
 #include "column_writer.hpp"
 #include "writer/parquet_write_stats.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "parquet_statistics.hpp"
+#include "duckdb/common/allocator.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/string.hpp"
+#include "duckdb/common/typedefs.hpp"
+#include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/vector.hpp"
+#include "parquet_types.h"
 
 namespace duckdb {
+class ParquetWriter;
+class Vector;
+class WriteStream;
+struct ParquetColumnSchema;
 
 struct PageInformation {
 	idx_t offset = 0;
@@ -57,33 +72,28 @@ public:
 //! Base class for writing non-compound types (ex. numerics, strings)
 class PrimitiveColumnWriter : public ColumnWriter {
 public:
-	PrimitiveColumnWriter(ParquetWriter &writer, idx_t schema_idx, vector<string> schema_path, idx_t max_repeat,
-	                      idx_t max_define, bool can_have_nulls);
+	PrimitiveColumnWriter(ParquetWriter &writer, ParquetColumnSchema &&column_schema, vector<string> schema_path);
 	~PrimitiveColumnWriter() override = default;
 
 	//! We limit the uncompressed page size to 100MB
 	//! The max size in Parquet is 2GB, but we choose a more conservative limit
-	static constexpr const idx_t MAX_UNCOMPRESSED_PAGE_SIZE = 100000000;
+	static constexpr const idx_t MAX_UNCOMPRESSED_PAGE_SIZE = 104857600ULL;
 	//! Dictionary pages must be below 2GB. Unlike data pages, there's only one dictionary page.
 	//! For this reason we go with a much higher, but still a conservative upper bound of 1GB;
-	static constexpr const idx_t MAX_UNCOMPRESSED_DICT_PAGE_SIZE = 1e9;
-	//! If the dictionary has this many entries, we stop creating the dictionary
-	static constexpr const idx_t DICTIONARY_ANALYZE_THRESHOLD = 1e4;
-	//! The maximum size a key entry in an RLE page takes
-	static constexpr const idx_t MAX_DICTIONARY_KEY_SIZE = sizeof(uint32_t);
-	//! The size of encoding the string length
-	static constexpr const idx_t STRING_LENGTH_SIZE = sizeof(uint32_t);
+	static constexpr const idx_t MAX_UNCOMPRESSED_DICT_PAGE_SIZE = 1073741824ULL;
 
 public:
 	unique_ptr<ColumnWriterState> InitializeWriteState(duckdb_parquet::RowGroup &row_group) override;
-	void Prepare(ColumnWriterState &state, ColumnWriterState *parent, Vector &vector, idx_t count) override;
+	void Prepare(ColumnWriterState &state, ColumnWriterState *parent, Vector &vector, idx_t count,
+	             bool vector_can_span_multiple_pages) override;
 	void BeginWrite(ColumnWriterState &state) override;
 	void Write(ColumnWriterState &state, Vector &vector, idx_t count) override;
 	void FinalizeWrite(ColumnWriterState &state) override;
+	idx_t FinalizeSchema(vector<duckdb_parquet::SchemaElement> &schemas) override;
 
 protected:
-	static void WriteLevels(WriteStream &temp_writer, const unsafe_vector<uint16_t> &levels, idx_t max_value,
-	                        idx_t start_offset, idx_t count, optional_idx null_count = optional_idx());
+	static void WriteLevels(Allocator &allocator, WriteStream &temp_writer, const unsafe_vector<uint16_t> &levels,
+	                        idx_t max_value, idx_t start_offset, idx_t count, optional_idx null_count = optional_idx());
 
 	virtual duckdb_parquet::Encoding::type GetEncoding(PrimitiveColumnWriterState &state);
 

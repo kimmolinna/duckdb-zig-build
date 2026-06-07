@@ -25,7 +25,7 @@ static bool IsNull(const char *buf, idx_t pos, idx_t end_pos) {
 	if (pos + 4 != end_pos) {
 		return false;
 	}
-	return StringUtil::CIEquals(string(buf + pos, buf + pos + 4), "null");
+	return StringUtil::CIEquals(buf + pos, 4, "null", 4);
 }
 
 inline static void SkipWhitespace(StringCastInputState &input_state) {
@@ -124,7 +124,8 @@ static string_t HandleString(Vector &vec, const char *buf, idx_t start, idx_t en
 	bool escaped = false;
 
 	bool quoted = false;
-	char quote_char;
+	// Satisfy GCC warning about uninitialized variable
+	char quote_char = '\0';
 	stack<char> scopes;
 	for (idx_t i = 0; i < length; i++) {
 		auto current_char = buf[start + i];
@@ -441,9 +442,8 @@ idx_t VectorStringToMap::CountPartsMap(const string_t &input) {
 }
 
 // ------- STRUCT SPLIT -------
-bool VectorStringToStruct::SplitStruct(const string_t &input, vector<unique_ptr<Vector>> &varchar_vectors,
-                                       idx_t &row_idx, string_map_t<idx_t> &child_names,
-                                       vector<reference<ValidityMask>> &child_masks) {
+bool VectorStringToStruct::SplitStruct(const string_t &input, vector<Vector> &varchar_vectors, idx_t &row_idx,
+                                       string_map_t<idx_t> &child_names, vector<reference<ValidityMask>> &child_masks) {
 	const char *buf = input.GetData();
 	idx_t len = input.GetSize();
 	idx_t pos = 0;
@@ -532,8 +532,8 @@ bool VectorStringToStruct::SplitStruct(const string_t &input, vector<unique_ptr<
 			if (pos == len) {
 				return false;
 			}
-			auto &child_vec = *varchar_vectors[child_idx];
-			auto string_data = FlatVector::GetData<string_t>(child_vec);
+			auto &child_vec = varchar_vectors[child_idx];
+			auto string_data = FlatVector::GetDataMutable<string_t>(child_vec);
 			auto &child_mask = child_masks[child_idx].get();
 
 			if (!start_pos.IsValid()) {
@@ -575,8 +575,8 @@ bool VectorStringToStruct::SplitStruct(const string_t &input, vector<unique_ptr<
 			if (pos == len) {
 				return false;
 			}
-			auto &child_vec = *varchar_vectors[child_idx];
-			auto string_data = FlatVector::GetData<string_t>(child_vec);
+			auto &child_vec = varchar_vectors[child_idx];
+			auto string_data = FlatVector::GetDataMutable<string_t>(child_vec);
 			auto &child_mask = child_masks[child_idx].get();
 
 			if (!start_pos.IsValid()) {

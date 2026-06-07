@@ -3,20 +3,17 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/types/interval.hpp"
-#include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/common/vector_operations/ternary_executor.hpp"
-#include "duckdb/main/client_context.hpp"
-#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "include/icu-datefunc.hpp"
 
 namespace duckdb {
 
 struct ICUTimeBucket : public ICUDateFunc {
-
 	// Use 2000-01-03 00:00:00 (Monday) as origin when bucket_width is days, hours, ... for TimescaleDB compatibility
 	// There are 10959 days between 1970-01-01 and 2000-01-03
 	constexpr static const int64_t DEFAULT_ORIGIN_MICROS_1 = 10959 * Interval::MICROS_PER_DAY;
@@ -61,13 +58,12 @@ struct ICUTimeBucket : public ICUDateFunc {
 		}
 	}
 
-	static inline timestamp_t WidthConvertibleToMicrosCommon(int64_t bucket_width_micros, const timestamp_t ts,
-	                                                         const timestamp_t origin, icu::Calendar *calendar) {
+	static inline timestamp_tz_t WidthConvertibleToMicrosCommon(int64_t bucket_width_micros, const timestamp_tz_t ts,
+	                                                            const timestamp_tz_t origin, TZCalendar &calendar) {
 		if (!bucket_width_micros) {
 			throw OutOfRangeException("Can't bucket using zero microseconds");
 		}
-		int64_t ts_micros = SubtractOperatorOverflowCheck::Operation<int64_t, int64_t, int64_t>(
-		    Timestamp::GetEpochMicroSeconds(ts), Timestamp::GetEpochMicroSeconds(origin));
+		int64_t ts_micros = SubtractOperatorOverflowCheck::Operation<int64_t, int64_t, int64_t>(ts.value, origin.value);
 		int64_t result_micros = (ts_micros / bucket_width_micros) * bucket_width_micros;
 		if (ts_micros < 0 && ts_micros % bucket_width_micros != 0) {
 			result_micros =
@@ -77,19 +73,19 @@ struct ICUTimeBucket : public ICUDateFunc {
 		return Add(calendar, origin, interval_t {0, 0, result_micros});
 	}
 
-	static inline timestamp_t WidthConvertibleToDaysCommon(int32_t bucket_width_days, const timestamp_t ts,
-	                                                       const timestamp_t origin, icu::Calendar *calendar) {
+	static inline timestamp_tz_t WidthConvertibleToDaysCommon(int32_t bucket_width_days, const timestamp_tz_t ts,
+	                                                          const timestamp_tz_t origin, TZCalendar &calendar) {
 		if (!bucket_width_days) {
 			throw OutOfRangeException("Can't bucket using zero days");
 		}
 		const auto sub_days = SubtractFactory(DatePartSpecifier::DAY);
 
-		int64_t ts_days = sub_days(calendar, origin, ts);
+		int64_t ts_days = sub_days(calendar.GetICUCalendar(), origin, ts);
 		int64_t result_days = (ts_days / bucket_width_days) * bucket_width_days;
 		if (result_days < NumericLimits<int32_t>::Minimum() || result_days > NumericLimits<int32_t>::Maximum()) {
 			throw OutOfRangeException("Timestamp out of range");
 		}
-		timestamp_t bucket = Add(calendar, origin, interval_t {0, static_cast<int32_t>(result_days), 0});
+		auto bucket = Add(calendar, origin, interval_t {0, static_cast<int32_t>(result_days), 0});
 		if (ts < bucket) {
 			D_ASSERT(ts < origin);
 			bucket = Add(calendar, bucket, interval_t {0, -bucket_width_days, 0});
@@ -99,21 +95,22 @@ struct ICUTimeBucket : public ICUDateFunc {
 		return bucket;
 	}
 
-	static inline timestamp_t WidthConvertibleToMonthsCommon(int32_t bucket_width_months, const timestamp_t ts,
-	                                                         const timestamp_t origin, icu::Calendar *calendar) {
+	static inline timestamp_tz_t WidthConvertibleToMonthsCommon(int32_t bucket_width_months, const timestamp_tz_t ts,
+	                                                            const timestamp_tz_t origin, TZCalendar &calendar_p) {
 		if (!bucket_width_months) {
 			throw OutOfRangeException("Can't bucket using zero months");
 		}
 		const auto trunc_months = TruncationFactory(DatePartSpecifier::MONTH);
 		const auto sub_months = SubtractFactory(DatePartSpecifier::MONTH);
 
+		auto calendar = calendar_p.GetICUCalendar();
 		uint64_t tmp_micros = SetTime(calendar, ts);
 		trunc_months(calendar, tmp_micros);
-		timestamp_t truncated_ts = GetTimeUnsafe(calendar, tmp_micros);
+		auto truncated_ts = GetTimeUnsafe(calendar, tmp_micros);
 
 		tmp_micros = SetTime(calendar, origin);
 		trunc_months(calendar, tmp_micros);
-		timestamp_t truncated_origin = GetTimeUnsafe(calendar, tmp_micros);
+		auto truncated_origin = GetTimeUnsafe(calendar, tmp_micros);
 
 		int32_t ts_months =
 		    NumericCast<int64_t, int32_t>(sub_months(calendar, truncated_origin, truncated_ts)); // NOLINT
@@ -126,7 +123,7 @@ struct ICUTimeBucket : public ICUDateFunc {
 			    SubtractOperatorOverflowCheck::Operation<int32_t, int32_t, int32_t>(result_months, bucket_width_months);
 		}
 
-		return Add(calendar, truncated_origin, interval_t {static_cast<int32_t>(result_months), 0, 0});
+		return Add(calendar_p, truncated_origin, interval_t {static_cast<int32_t>(result_months), 0, 0});
 	}
 
 	template <typename TA, typename TB, typename TR, typename OP>
@@ -134,10 +131,10 @@ struct ICUTimeBucket : public ICUDateFunc {
 		D_ASSERT(args.ColumnCount() == 2);
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-		auto &info = func_expr.bind_info->Cast<BindData>();
+		auto &info = func_expr.BindInfo()->Cast<BindData>();
 		CalendarPtr calendar(info.calendar->clone());
 
-		BinaryExecutor::Execute<TA, TB, TR>(args.data[0], args.data[1], result, args.size(), [&](TA left, TB right) {
+		BinaryExecutor::Execute<TA, TB, TR>(args.data[0], args.data[1], result, [&](TA left, TB right) {
 			return OP::template Operation<TA, TB, TR>(left, right, calendar);
 		});
 	}
@@ -147,47 +144,48 @@ struct ICUTimeBucket : public ICUDateFunc {
 		D_ASSERT(args.ColumnCount() == 3);
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-		auto &info = func_expr.bind_info->Cast<BindData>();
+		auto &info = func_expr.BindInfo()->Cast<BindData>();
 		CalendarPtr calendar(info.calendar->clone());
 
 		TernaryExecutor::Execute<TA, TB, TC, TR>(
-		    args.data[0], args.data[1], args.data[2], result, args.size(), [&](TA ta, TB tb, TC tc) {
+		    args.data[0], args.data[1], args.data[2], result, [&](TA ta, TB tb, TC tc) {
 			    return OP::template Operation<TA, TB, TC, TR>(args.data[0], args.data[1], args.data[2], calendar.get());
 		    });
 	}
 
 	struct WidthConvertibleToMicrosBinaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
-			const auto origin = Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1);
+			const timestamp_tz_t origin(DEFAULT_ORIGIN_MICROS_1);
 			return WidthConvertibleToMicrosCommon(bucket_width.micros, ts, origin, calendar);
 		}
 	};
 
 	struct WidthConvertibleToDaysBinaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
-			const auto origin = Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1);
+			const timestamp_tz_t origin(DEFAULT_ORIGIN_MICROS_1);
+			;
 			return WidthConvertibleToDaysCommon(bucket_width.days, ts, origin, calendar);
 		}
 	};
 
 	struct WidthConvertibleToMonthsBinaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
-			const auto origin = Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_2);
+			const timestamp_tz_t origin(DEFAULT_ORIGIN_MICROS_2);
 			return WidthConvertibleToMonthsCommon(bucket_width.months, ts, origin, calendar);
 		}
 	};
 
 	struct BinaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, icu::Calendar *calendar) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, TZCalendar &calendar) {
 			BucketWidthType bucket_width_type = ClassifyBucketWidthErrorThrow(bucket_width);
 			switch (bucket_width_type) {
 			case BucketWidthType::CONVERTIBLE_TO_MICROS:
@@ -203,12 +201,12 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct OffsetWidthConvertibleToMicrosTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, interval_t offset,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, interval_t offset,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
-			const auto origin = Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1);
+			const timestamp_tz_t origin(DEFAULT_ORIGIN_MICROS_1);
 			return Add(calendar,
 			           WidthConvertibleToMicrosCommon(bucket_width.micros, Sub(calendar, ts, offset), origin, calendar),
 			           offset);
@@ -216,12 +214,12 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct OffsetWidthConvertibleToDaysTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, interval_t offset,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, interval_t offset,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
-			const auto origin = Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1);
+			const timestamp_tz_t origin(DEFAULT_ORIGIN_MICROS_1);
 			return Add(calendar,
 			           WidthConvertibleToDaysCommon(bucket_width.days, Sub(calendar, ts, offset), origin, calendar),
 			           offset);
@@ -229,12 +227,12 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct OffsetWidthConvertibleToMonthsTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, interval_t offset,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, interval_t offset,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
-			const auto origin = Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_2);
+			const timestamp_tz_t origin(DEFAULT_ORIGIN_MICROS_2);
 			return Add(calendar,
 			           WidthConvertibleToMonthsCommon(bucket_width.months, Sub(calendar, ts, offset), origin, calendar),
 			           offset);
@@ -242,8 +240,8 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct OffsetTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, interval_t offset,
-		                                    icu::Calendar *calendar) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, interval_t offset,
+		                                       TZCalendar &calendar) {
 			BucketWidthType bucket_width_type = ClassifyBucketWidthErrorThrow(bucket_width);
 			switch (bucket_width_type) {
 			case BucketWidthType::CONVERTIBLE_TO_MICROS:
@@ -259,9 +257,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct OriginWidthConvertibleToMicrosTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, timestamp_t origin,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
 			return WidthConvertibleToMicrosCommon(bucket_width.micros, ts, origin, calendar);
@@ -269,9 +267,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct OriginWidthConvertibleToDaysTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, timestamp_t origin,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
 			return WidthConvertibleToDaysCommon(bucket_width.days, ts, origin, calendar);
@@ -279,9 +277,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct OriginWidthConvertibleToMonthsTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, timestamp_t origin,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
 			return WidthConvertibleToMonthsCommon(bucket_width.months, ts, origin, calendar);
@@ -289,11 +287,10 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct OriginTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, timestamp_t origin,
-		                                    ValidityMask &mask, idx_t idx, icu::Calendar *calendar) {
-			if (!Value::IsFinite(origin)) {
-				mask.SetInvalid(idx);
-				return timestamp_t(0);
+		static inline optional<timestamp_tz_t> Operation(interval_t bucket_width, timestamp_tz_t ts,
+		                                                 timestamp_tz_t origin, TZCalendar &calendar) {
+			if (!origin.IsFinite()) {
+				return nullopt;
 			}
 			BucketWidthType bucket_width_type = ClassifyBucketWidthErrorThrow(bucket_width);
 			switch (bucket_width_type) {
@@ -310,9 +307,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct TimeZoneWidthConvertibleToMicrosBinaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, timestamp_t origin,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
 			return WidthConvertibleToMicrosCommon(bucket_width.micros, ts, origin, calendar);
@@ -320,9 +317,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct TimeZoneWidthConvertibleToDaysBinaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, timestamp_t origin,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
 			return WidthConvertibleToDaysCommon(bucket_width.days, ts, origin, calendar);
@@ -330,9 +327,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct TimeZoneWidthConvertibleToMonthsBinaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, timestamp_t origin,
-		                                    icu::Calendar *calendar) {
-			if (!Value::IsFinite(ts)) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin,
+		                                       TZCalendar &calendar) {
+			if (!ts.IsFinite()) {
 				return ts;
 			}
 			return WidthConvertibleToMonthsCommon(bucket_width.months, ts, origin, calendar);
@@ -340,22 +337,23 @@ struct ICUTimeBucket : public ICUDateFunc {
 	};
 
 	struct TimeZoneTernaryOperator {
-		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, string_t tz,
-		                                    icu::Calendar *calendar) {
+		static inline timestamp_tz_t Operation(interval_t bucket_width, timestamp_tz_t ts, string_t tz,
+		                                       TZCalendar &calendar_p) {
+			auto calendar = calendar_p.GetICUCalendar();
 			SetTimeZone(calendar, tz);
 
-			timestamp_t origin;
+			timestamp_tz_t origin;
 			BucketWidthType bucket_width_type = ClassifyBucketWidthErrorThrow(bucket_width);
 			switch (bucket_width_type) {
 			case BucketWidthType::CONVERTIBLE_TO_MICROS:
 				origin = ICUDateFunc::FromNaive(calendar, Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1));
-				return TimeZoneWidthConvertibleToMicrosBinaryOperator::Operation(bucket_width, ts, origin, calendar);
+				return TimeZoneWidthConvertibleToMicrosBinaryOperator::Operation(bucket_width, ts, origin, calendar_p);
 			case BucketWidthType::CONVERTIBLE_TO_DAYS:
 				origin = ICUDateFunc::FromNaive(calendar, Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1));
-				return TimeZoneWidthConvertibleToDaysBinaryOperator::Operation(bucket_width, ts, origin, calendar);
+				return TimeZoneWidthConvertibleToDaysBinaryOperator::Operation(bucket_width, ts, origin, calendar_p);
 			case BucketWidthType::CONVERTIBLE_TO_MONTHS:
 				origin = ICUDateFunc::FromNaive(calendar, Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_2));
-				return TimeZoneWidthConvertibleToMonthsBinaryOperator::Operation(bucket_width, ts, origin, calendar);
+				return TimeZoneWidthConvertibleToMonthsBinaryOperator::Operation(bucket_width, ts, origin, calendar_p);
 			default:
 				throw NotImplementedException("Bucket type not implemented for ICU TIME_BUCKET");
 			}
@@ -366,53 +364,50 @@ struct ICUTimeBucket : public ICUDateFunc {
 		D_ASSERT(args.ColumnCount() == 2);
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-		auto &info = func_expr.bind_info->Cast<BindData>();
-		CalendarPtr calendar_ptr(info.calendar->clone());
-		auto calendar = calendar_ptr.get();
-		SetTimeZone(calendar, string_t("UTC"));
+		auto &info = func_expr.BindInfo()->Cast<BindData>();
+		TZCalendar calendar(*info.calendar, info.cal_setting);
+		SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
 
-		auto &bucket_width_arg = args.data[0];
-		auto &ts_arg = args.data[1];
+		const auto &bucket_width_arg = args.data[0];
+		const auto &ts_arg = args.data[1];
 
 		if (bucket_width_arg.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 			if (ConstantVector::IsNull(bucket_width_arg)) {
-				result.SetVectorType(VectorType::CONSTANT_VECTOR);
-				ConstantVector::SetNull(result, true);
-			} else {
-				interval_t bucket_width = *ConstantVector::GetData<interval_t>(bucket_width_arg);
-				BucketWidthType bucket_width_type = ClassifyBucketWidth(bucket_width);
-				switch (bucket_width_type) {
-				case BucketWidthType::CONVERTIBLE_TO_MICROS:
-					BinaryExecutor::Execute<interval_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, result, args.size(), [&](interval_t bucket_width, timestamp_t ts) {
-						    return WidthConvertibleToMicrosBinaryOperator::Operation(bucket_width, ts, calendar);
-					    });
-					break;
-				case BucketWidthType::CONVERTIBLE_TO_DAYS:
-					BinaryExecutor::Execute<interval_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, result, args.size(), [&](interval_t bucket_width, timestamp_t ts) {
-						    return WidthConvertibleToDaysBinaryOperator::Operation(bucket_width, ts, calendar);
-					    });
-					break;
-				case BucketWidthType::CONVERTIBLE_TO_MONTHS:
-					BinaryExecutor::Execute<interval_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, result, args.size(), [&](interval_t bucket_width, timestamp_t ts) {
-						    return WidthConvertibleToMonthsBinaryOperator::Operation(bucket_width, ts, calendar);
-					    });
-					break;
-				case BucketWidthType::UNCLASSIFIED:
-					BinaryExecutor::Execute<interval_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, result, args.size(), [&](interval_t bucket_width, timestamp_t ts) {
-						    return BinaryOperator::Operation(bucket_width, ts, calendar);
-					    });
-					break;
-				default:
-					throw NotImplementedException("Bucket type not implemented for ICU TIME_BUCKET");
-				}
+				throw InternalException("ICUTimeBucket called with constant NULL bucket");
+			}
+			interval_t bucket_width = *ConstantVector::GetData<interval_t>(bucket_width_arg);
+			BucketWidthType bucket_width_type = ClassifyBucketWidth(bucket_width);
+			switch (bucket_width_type) {
+			case BucketWidthType::CONVERTIBLE_TO_MICROS:
+				BinaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts) {
+					    return WidthConvertibleToMicrosBinaryOperator::Operation(bucket_width, ts, calendar);
+				    });
+				break;
+			case BucketWidthType::CONVERTIBLE_TO_DAYS:
+				BinaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts) {
+					    return WidthConvertibleToDaysBinaryOperator::Operation(bucket_width, ts, calendar);
+				    });
+				break;
+			case BucketWidthType::CONVERTIBLE_TO_MONTHS:
+				BinaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts) {
+					    return WidthConvertibleToMonthsBinaryOperator::Operation(bucket_width, ts, calendar);
+				    });
+				break;
+			case BucketWidthType::UNCLASSIFIED:
+				BinaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts) {
+					    return BinaryOperator::Operation(bucket_width, ts, calendar);
+				    });
+				break;
+			default:
+				throw NotImplementedException("Bucket type not implemented for ICU TIME_BUCKET");
 			}
 		} else {
-			BinaryExecutor::Execute<interval_t, timestamp_t, timestamp_t>(
-			    bucket_width_arg, ts_arg, result, args.size(), [&](interval_t bucket_width, timestamp_t ts) {
+			BinaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t>(
+			    bucket_width_arg, ts_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts) {
 				    return BinaryOperator::Operation(bucket_width, ts, calendar);
 			    });
 		}
@@ -422,62 +417,59 @@ struct ICUTimeBucket : public ICUDateFunc {
 		D_ASSERT(args.ColumnCount() == 3);
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-		auto &info = func_expr.bind_info->Cast<BindData>();
-		CalendarPtr calendar_ptr(info.calendar->clone());
-		auto calendar = calendar_ptr.get();
-		SetTimeZone(calendar, string_t("UTC"));
+		auto &info = func_expr.BindInfo()->Cast<BindData>();
+		TZCalendar calendar(*info.calendar, info.cal_setting);
+		SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
 
-		auto &bucket_width_arg = args.data[0];
-		auto &ts_arg = args.data[1];
-		auto &offset_arg = args.data[2];
+		const auto &bucket_width_arg = args.data[0];
+		const auto &ts_arg = args.data[1];
+		const auto &offset_arg = args.data[2];
 
 		if (bucket_width_arg.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 			if (ConstantVector::IsNull(bucket_width_arg)) {
-				result.SetVectorType(VectorType::CONSTANT_VECTOR);
-				ConstantVector::SetNull(result, true);
-			} else {
-				interval_t bucket_width = *ConstantVector::GetData<interval_t>(bucket_width_arg);
-				BucketWidthType bucket_width_type = ClassifyBucketWidth(bucket_width);
-				switch (bucket_width_type) {
-				case BucketWidthType::CONVERTIBLE_TO_MICROS:
-					TernaryExecutor::Execute<interval_t, timestamp_t, interval_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, offset_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, interval_t offset) {
-						    return OffsetWidthConvertibleToMicrosTernaryOperator::Operation(bucket_width, ts, offset,
-						                                                                    calendar);
-					    });
-					break;
-				case BucketWidthType::CONVERTIBLE_TO_DAYS:
-					TernaryExecutor::Execute<interval_t, timestamp_t, interval_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, offset_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, interval_t offset) {
-						    return OffsetWidthConvertibleToDaysTernaryOperator::Operation(bucket_width, ts, offset,
-						                                                                  calendar);
-					    });
-					break;
-				case BucketWidthType::CONVERTIBLE_TO_MONTHS:
-					TernaryExecutor::Execute<interval_t, timestamp_t, interval_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, offset_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, interval_t offset) {
-						    return OffsetWidthConvertibleToMonthsTernaryOperator::Operation(bucket_width, ts, offset,
-						                                                                    calendar);
-					    });
-					break;
-				case BucketWidthType::UNCLASSIFIED:
-					TernaryExecutor::Execute<interval_t, timestamp_t, interval_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, offset_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, interval_t offset) {
-						    return OffsetTernaryOperator::Operation(bucket_width, ts, offset, calendar);
-					    });
-					break;
-				default:
-					throw NotImplementedException("Bucket type not implemented for ICU TIME_BUCKET");
-				}
+				throw InternalException("ICUTimeBucketOffset called with constant NULL bucket");
+			}
+			interval_t bucket_width = *ConstantVector::GetData<interval_t>(bucket_width_arg);
+			BucketWidthType bucket_width_type = ClassifyBucketWidth(bucket_width);
+			switch (bucket_width_type) {
+			case BucketWidthType::CONVERTIBLE_TO_MICROS:
+				TernaryExecutor::Execute<interval_t, timestamp_tz_t, interval_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, offset_arg, result,
+				    [&](interval_t bucket_width, timestamp_tz_t ts, interval_t offset) {
+					    return OffsetWidthConvertibleToMicrosTernaryOperator::Operation(bucket_width, ts, offset,
+					                                                                    calendar);
+				    });
+				break;
+			case BucketWidthType::CONVERTIBLE_TO_DAYS:
+				TernaryExecutor::Execute<interval_t, timestamp_tz_t, interval_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, offset_arg, result,
+				    [&](interval_t bucket_width, timestamp_tz_t ts, interval_t offset) {
+					    return OffsetWidthConvertibleToDaysTernaryOperator::Operation(bucket_width, ts, offset,
+					                                                                  calendar);
+				    });
+				break;
+			case BucketWidthType::CONVERTIBLE_TO_MONTHS:
+				TernaryExecutor::Execute<interval_t, timestamp_tz_t, interval_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, offset_arg, result,
+				    [&](interval_t bucket_width, timestamp_tz_t ts, interval_t offset) {
+					    return OffsetWidthConvertibleToMonthsTernaryOperator::Operation(bucket_width, ts, offset,
+					                                                                    calendar);
+				    });
+				break;
+			case BucketWidthType::UNCLASSIFIED:
+				TernaryExecutor::Execute<interval_t, timestamp_tz_t, interval_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, offset_arg, result,
+				    [&](interval_t bucket_width, timestamp_tz_t ts, interval_t offset) {
+					    return OffsetTernaryOperator::Operation(bucket_width, ts, offset, calendar);
+				    });
+				break;
+			default:
+				throw NotImplementedException("Bucket type not implemented for ICU TIME_BUCKET");
 			}
 		} else {
-			TernaryExecutor::Execute<interval_t, timestamp_t, interval_t, timestamp_t>(
-			    bucket_width_arg, ts_arg, offset_arg, result, args.size(),
-			    [&](interval_t bucket_width, timestamp_t ts, interval_t offset) {
+			TernaryExecutor::Execute<interval_t, timestamp_tz_t, interval_t, timestamp_tz_t>(
+			    bucket_width_arg, ts_arg, offset_arg, result,
+			    [&](interval_t bucket_width, timestamp_tz_t ts, interval_t offset) {
 				    return OffsetTernaryOperator::Operation(bucket_width, ts, offset, calendar);
 			    });
 		}
@@ -487,55 +479,53 @@ struct ICUTimeBucket : public ICUDateFunc {
 		D_ASSERT(args.ColumnCount() == 3);
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-		auto &info = func_expr.bind_info->Cast<BindData>();
-		CalendarPtr calendar_ptr(info.calendar->clone());
-		auto calendar = calendar_ptr.get();
-		SetTimeZone(calendar, string_t("UTC"));
+		auto &info = func_expr.BindInfo()->Cast<BindData>();
+		TZCalendar calendar(*info.calendar, info.cal_setting);
+		SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
 
-		auto &bucket_width_arg = args.data[0];
-		auto &ts_arg = args.data[1];
-		auto &origin_arg = args.data[2];
+		const auto &bucket_width_arg = args.data[0];
+		const auto &ts_arg = args.data[1];
+		const auto &origin_arg = args.data[2];
 
 		if (bucket_width_arg.GetVectorType() == VectorType::CONSTANT_VECTOR &&
 		    origin_arg.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 			if (ConstantVector::IsNull(bucket_width_arg) || ConstantVector::IsNull(origin_arg) ||
-			    !Value::IsFinite(*ConstantVector::GetData<timestamp_t>(origin_arg))) {
-				result.SetVectorType(VectorType::CONSTANT_VECTOR);
-				ConstantVector::SetNull(result, true);
+			    !Value::IsFinite(*ConstantVector::GetData<timestamp_tz_t>(origin_arg))) {
+				ConstantVector::SetNull(result, count_t(args.size()));
 			} else {
 				interval_t bucket_width = *ConstantVector::GetData<interval_t>(bucket_width_arg);
 				BucketWidthType bucket_width_type = ClassifyBucketWidth(bucket_width);
 				switch (bucket_width_type) {
 				case BucketWidthType::CONVERTIBLE_TO_MICROS:
-					TernaryExecutor::Execute<interval_t, timestamp_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, origin_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, timestamp_t origin) {
+					TernaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t, timestamp_tz_t>(
+					    bucket_width_arg, ts_arg, origin_arg, result,
+					    [&](interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin) {
 						    return OriginWidthConvertibleToMicrosTernaryOperator::Operation(bucket_width, ts, origin,
 						                                                                    calendar);
 					    });
 					break;
 				case BucketWidthType::CONVERTIBLE_TO_DAYS:
-					TernaryExecutor::Execute<interval_t, timestamp_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, origin_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, timestamp_t origin) {
+					TernaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t, timestamp_tz_t>(
+					    bucket_width_arg, ts_arg, origin_arg, result,
+					    [&](interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin) {
 						    return OriginWidthConvertibleToDaysTernaryOperator::Operation(bucket_width, ts, origin,
 						                                                                  calendar);
 					    });
 					break;
 				case BucketWidthType::CONVERTIBLE_TO_MONTHS:
-					TernaryExecutor::Execute<interval_t, timestamp_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, origin_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, timestamp_t origin) {
+					TernaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t, timestamp_tz_t>(
+					    bucket_width_arg, ts_arg, origin_arg, result,
+					    [&](interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin) {
 						    return OriginWidthConvertibleToMonthsTernaryOperator::Operation(bucket_width, ts, origin,
 						                                                                    calendar);
 					    });
 					break;
 				case BucketWidthType::UNCLASSIFIED:
-					TernaryExecutor::ExecuteWithNulls<interval_t, timestamp_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, origin_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, timestamp_t origin, ValidityMask &mask,
-					        idx_t idx) {
-						    return OriginTernaryOperator::Operation(bucket_width, ts, origin, mask, idx, calendar);
+					TernaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t, timestamp_tz_t>(
+					    bucket_width_arg, ts_arg, origin_arg, result,
+					    [&](interval_t bucket_width, timestamp_tz_t ts,
+					        timestamp_tz_t origin) -> optional<timestamp_tz_t> {
+						    return OriginTernaryOperator::Operation(bucket_width, ts, origin, calendar);
 					    });
 					break;
 				default:
@@ -543,10 +533,10 @@ struct ICUTimeBucket : public ICUDateFunc {
 				}
 			}
 		} else {
-			TernaryExecutor::ExecuteWithNulls<interval_t, timestamp_t, timestamp_t, timestamp_t>(
-			    bucket_width_arg, ts_arg, origin_arg, result, args.size(),
-			    [&](interval_t bucket_width, timestamp_t ts, timestamp_t origin, ValidityMask &mask, idx_t idx) {
-				    return OriginTernaryOperator::Operation(bucket_width, ts, origin, mask, idx, calendar);
+			TernaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t, timestamp_tz_t>(
+			    bucket_width_arg, ts_arg, origin_arg, result,
+			    [&](interval_t bucket_width, timestamp_tz_t ts, timestamp_tz_t origin) -> optional<timestamp_tz_t> {
+				    return OriginTernaryOperator::Operation(bucket_width, ts, origin, calendar);
 			    });
 		}
 	}
@@ -555,73 +545,69 @@ struct ICUTimeBucket : public ICUDateFunc {
 		D_ASSERT(args.ColumnCount() == 3);
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-		auto &info = func_expr.bind_info->Cast<BindData>();
-		CalendarPtr calendar_ptr(info.calendar->clone());
-		auto calendar = calendar_ptr.get();
+		auto &info = func_expr.BindInfo()->Cast<BindData>();
+		TZCalendar calendar(*info.calendar, info.cal_setting);
 
-		auto &bucket_width_arg = args.data[0];
-		auto &ts_arg = args.data[1];
-		auto &tz_arg = args.data[2];
+		const auto &bucket_width_arg = args.data[0];
+		const auto &ts_arg = args.data[1];
+		const auto &tz_arg = args.data[2];
 
 		if (bucket_width_arg.GetVectorType() == VectorType::CONSTANT_VECTOR &&
 		    tz_arg.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 			if (ConstantVector::IsNull(bucket_width_arg) || ConstantVector::IsNull(tz_arg)) {
-				result.SetVectorType(VectorType::CONSTANT_VECTOR);
-				ConstantVector::SetNull(result, true);
-			} else {
-				interval_t bucket_width = *ConstantVector::GetData<interval_t>(bucket_width_arg);
-				SetTimeZone(calendar, *ConstantVector::GetData<string_t>(tz_arg));
-				timestamp_t origin;
-				BucketWidthType bucket_width_type = ClassifyBucketWidth(bucket_width);
-				switch (bucket_width_type) {
-				case BucketWidthType::CONVERTIBLE_TO_MICROS:
-					origin =
-					    ICUDateFunc::FromNaive(calendar, Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1));
-					BinaryExecutor::Execute<interval_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, result, args.size(), [&](interval_t bucket_width, timestamp_t ts) {
-						    return TimeZoneWidthConvertibleToMicrosBinaryOperator::Operation(bucket_width, ts, origin,
-						                                                                     calendar);
-					    });
-					break;
-				case BucketWidthType::CONVERTIBLE_TO_DAYS:
-					origin =
-					    ICUDateFunc::FromNaive(calendar, Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1));
-					BinaryExecutor::Execute<interval_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, result, args.size(), [&](interval_t bucket_width, timestamp_t ts) {
-						    return TimeZoneWidthConvertibleToDaysBinaryOperator::Operation(bucket_width, ts, origin,
-						                                                                   calendar);
-					    });
-					break;
-				case BucketWidthType::CONVERTIBLE_TO_MONTHS:
-					origin =
-					    ICUDateFunc::FromNaive(calendar, Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_2));
-					BinaryExecutor::Execute<interval_t, timestamp_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, result, args.size(), [&](interval_t bucket_width, timestamp_t ts) {
-						    return TimeZoneWidthConvertibleToMonthsBinaryOperator::Operation(bucket_width, ts, origin,
-						                                                                     calendar);
-					    });
-					break;
-				case BucketWidthType::UNCLASSIFIED:
-					TernaryExecutor::Execute<interval_t, timestamp_t, string_t, timestamp_t>(
-					    bucket_width_arg, ts_arg, tz_arg, result, args.size(),
-					    [&](interval_t bucket_width, timestamp_t ts, string_t tz) {
-						    return TimeZoneTernaryOperator::Operation(bucket_width, ts, tz, calendar);
-					    });
-					break;
-				default:
-					throw NotImplementedException("Bucket type not implemented for ICU TIME_BUCKET");
-				}
+				throw InternalException("ICUTimeBucketTimeZone called with constant NULL bucket width or tz");
+			}
+			interval_t bucket_width = *ConstantVector::GetData<interval_t>(bucket_width_arg);
+			SetTimeZone(calendar.GetICUCalendar(), *ConstantVector::GetData<string_t>(tz_arg));
+			timestamp_tz_t origin;
+			BucketWidthType bucket_width_type = ClassifyBucketWidth(bucket_width);
+			switch (bucket_width_type) {
+			case BucketWidthType::CONVERTIBLE_TO_MICROS:
+				origin = ICUDateFunc::FromNaive(calendar.GetICUCalendar(),
+				                                Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1));
+				BinaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts) {
+					    return TimeZoneWidthConvertibleToMicrosBinaryOperator::Operation(bucket_width, ts, origin,
+					                                                                     calendar);
+				    });
+				break;
+			case BucketWidthType::CONVERTIBLE_TO_DAYS:
+				origin = ICUDateFunc::FromNaive(calendar.GetICUCalendar(),
+				                                Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_1));
+				BinaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts) {
+					    return TimeZoneWidthConvertibleToDaysBinaryOperator::Operation(bucket_width, ts, origin,
+					                                                                   calendar);
+				    });
+				break;
+			case BucketWidthType::CONVERTIBLE_TO_MONTHS:
+				origin = ICUDateFunc::FromNaive(calendar.GetICUCalendar(),
+				                                Timestamp::FromEpochMicroSeconds(DEFAULT_ORIGIN_MICROS_2));
+				BinaryExecutor::Execute<interval_t, timestamp_tz_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts) {
+					    return TimeZoneWidthConvertibleToMonthsBinaryOperator::Operation(bucket_width, ts, origin,
+					                                                                     calendar);
+				    });
+				break;
+			case BucketWidthType::UNCLASSIFIED:
+				TernaryExecutor::Execute<interval_t, timestamp_tz_t, string_t, timestamp_tz_t>(
+				    bucket_width_arg, ts_arg, tz_arg, result,
+				    [&](interval_t bucket_width, timestamp_tz_t ts, string_t tz) {
+					    return TimeZoneTernaryOperator::Operation(bucket_width, ts, tz, calendar);
+				    });
+				break;
+			default:
+				throw NotImplementedException("Bucket type not implemented for ICU TIME_BUCKET");
 			}
 		} else {
-			TernaryExecutor::Execute<interval_t, timestamp_t, string_t, timestamp_t>(
-			    bucket_width_arg, ts_arg, tz_arg, result, args.size(),
-			    [&](interval_t bucket_width, timestamp_t ts, string_t tz) {
+			TernaryExecutor::Execute<interval_t, timestamp_tz_t, string_t, timestamp_tz_t>(
+			    bucket_width_arg, ts_arg, tz_arg, result, [&](interval_t bucket_width, timestamp_tz_t ts, string_t tz) {
 				    return TimeZoneTernaryOperator::Operation(bucket_width, ts, tz, calendar);
 			    });
 		}
 	}
 
-	static void AddTimeBucketFunction(DatabaseInstance &db) {
+	static void AddTimeBucketFunction(ExtensionLoader &loader) {
 		ScalarFunctionSet set("time_bucket");
 		set.AddFunction(ScalarFunction({LogicalType::INTERVAL, LogicalType::TIMESTAMP_TZ}, LogicalType::TIMESTAMP_TZ,
 		                               ICUTimeBucketFunction, Bind));
@@ -632,14 +618,15 @@ struct ICUTimeBucket : public ICUDateFunc {
 		set.AddFunction(ScalarFunction({LogicalType::INTERVAL, LogicalType::TIMESTAMP_TZ, LogicalType::VARCHAR},
 		                               LogicalType::TIMESTAMP_TZ, ICUTimeBucketTimeZoneFunction, Bind));
 		for (auto &func : set.functions) {
-			BaseScalarFunction::SetReturnsError(func);
+			func.SetFallible();
+			func.SetArgProperties(1, ArgProperties().NonDecreasing());
 		}
-		ExtensionUtil::RegisterFunction(db, set);
+		loader.RegisterFunction(set);
 	}
 };
 
-void RegisterICUTimeBucketFunctions(DatabaseInstance &db) {
-	ICUTimeBucket::AddTimeBucketFunction(db);
+void RegisterICUTimeBucketFunctions(ExtensionLoader &loader) {
+	ICUTimeBucket::AddTimeBucketFunction(loader);
 }
 
 } // namespace duckdb

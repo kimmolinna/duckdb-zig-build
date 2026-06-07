@@ -6,12 +6,9 @@
 statement ok
 PRAGMA verify_parallelism
 
-statement ok
-PRAGMA enable_verification
-
 query IIIIIIIIII
 select *
-from  read_csv('data/csv/bug_7578.csv', delim='\t', quote = '`', columns={
+from  read_csv('{DATA_DIR}/csv/bug_7578.csv', delim='\t', quote = '`', columns={
   'transaction_id': 'VARCHAR',
   'team_id': 'INT',
   'direction': 'INT',
@@ -29,14 +26,14 @@ from  read_csv('data/csv/bug_7578.csv', delim='\t', quote = '`', columns={
 
 
 # FIXME: this fails randomly
-mode skip
+mode skip flaky
 
 statement ok
 pragma threads=2
 
 statement error
 select *
-from  read_csv('data/csv/bug_7578.csv', delim='\t',  columns={
+from  read_csv('{DATA_DIR}/csv/bug_7578.csv', delim='\t',  columns={
   'transaction_id': 'VARCHAR',
   'team_id': 'INT',
   'direction': 'INT',

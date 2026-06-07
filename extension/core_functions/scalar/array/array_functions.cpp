@@ -1,56 +1,58 @@
+#include "duckdb/common/vector/array_vector.hpp"
 #include "core_functions/scalar/array_functions.hpp"
 #include "core_functions/array_kernels.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 
 namespace duckdb {
 
-static unique_ptr<FunctionData> ArrayGenericBinaryBind(ClientContext &context, ScalarFunction &bound_function,
-                                                       vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> ArrayGenericBinaryBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+	const auto &lhs_type = arguments[0]->GetReturnType();
+	const auto &rhs_type = arguments[1]->GetReturnType();
 
-	const auto lhs_is_param = arguments[0]->HasParameter();
-	const auto rhs_is_param = arguments[1]->HasParameter();
-
-	if (lhs_is_param && rhs_is_param) {
-		throw ParameterNotResolvedException();
+	if (lhs_type.IsUnknown() && rhs_type.IsUnknown()) {
+		bound_function.GetArguments()[0] = rhs_type;
+		bound_function.GetArguments()[1] = lhs_type;
+		bound_function.SetReturnType(LogicalType::UNKNOWN);
+		return nullptr;
 	}
 
-	const auto &lhs_type = arguments[0]->return_type;
-	const auto &rhs_type = arguments[1]->return_type;
+	bound_function.GetArguments()[0] = lhs_type.IsUnknown() ? rhs_type : lhs_type;
+	bound_function.GetArguments()[1] = rhs_type.IsUnknown() ? lhs_type : rhs_type;
 
-	bound_function.arguments[0] = lhs_is_param ? rhs_type : lhs_type;
-	bound_function.arguments[1] = rhs_is_param ? lhs_type : rhs_type;
-
-	if (bound_function.arguments[0].id() != LogicalTypeId::ARRAY ||
-	    bound_function.arguments[1].id() != LogicalTypeId::ARRAY) {
+	if (bound_function.GetArguments()[0].id() != LogicalTypeId::ARRAY ||
+	    bound_function.GetArguments()[1].id() != LogicalTypeId::ARRAY) {
 		throw InvalidInputException(
-		    StringUtil::Format("%s: Arguments must be arrays of FLOAT or DOUBLE", bound_function.name));
+		    StringUtil::Format("%s: Arguments must be arrays of FLOAT or DOUBLE", bound_function.GetName()));
 	}
 
-	const auto lhs_size = ArrayType::GetSize(bound_function.arguments[0]);
-	const auto rhs_size = ArrayType::GetSize(bound_function.arguments[1]);
+	const auto lhs_size = ArrayType::GetSize(bound_function.GetArguments()[0]);
+	const auto rhs_size = ArrayType::GetSize(bound_function.GetArguments()[1]);
 
 	if (lhs_size != rhs_size) {
-		throw BinderException("%s: Array arguments must be of the same size", bound_function.name);
+		throw BinderException("%s: Array arguments must be of the same size", bound_function.GetName());
 	}
 
-	const auto &lhs_element_type = ArrayType::GetChildType(bound_function.arguments[0]);
-	const auto &rhs_element_type = ArrayType::GetChildType(bound_function.arguments[1]);
+	const auto &lhs_element_type = ArrayType::GetChildType(bound_function.GetArguments()[0]);
+	const auto &rhs_element_type = ArrayType::GetChildType(bound_function.GetArguments()[1]);
 
 	// Resolve common type
 	LogicalType common_type;
 	if (!LogicalType::TryGetMaxLogicalType(context, lhs_element_type, rhs_element_type, common_type)) {
-		throw BinderException("%s: Cannot infer common element type (left = '%s', right = '%s')", bound_function.name,
-		                      lhs_element_type.ToString(), rhs_element_type.ToString());
+		throw BinderException("%s: Cannot infer common element type (left = '%s', right = '%s')",
+		                      bound_function.GetName(), lhs_element_type.ToString(), rhs_element_type.ToString());
 	}
 
 	// Ensure it is float or double
 	if (common_type.id() != LogicalTypeId::FLOAT && common_type.id() != LogicalTypeId::DOUBLE) {
-		throw BinderException("%s: Arguments must be arrays of FLOAT or DOUBLE", bound_function.name);
+		throw BinderException("%s: Arguments must be arrays of FLOAT or DOUBLE", bound_function.GetName());
 	}
 
 	// The important part is just that we resolve the size of the input arrays
-	bound_function.arguments[0] = LogicalType::ARRAY(common_type, lhs_size);
-	bound_function.arguments[1] = LogicalType::ARRAY(common_type, rhs_size);
+	bound_function.GetArguments()[0] = LogicalType::ARRAY(common_type, lhs_size);
+	bound_function.GetArguments()[1] = LogicalType::ARRAY(common_type, rhs_size);
 
 	return nullptr;
 }
@@ -60,7 +62,7 @@ static unique_ptr<FunctionData> ArrayGenericBinaryBind(ClientContext &context, S
 //------------------------------------------------------------------------------
 // Given two arrays of the same size, combine their elements into a single array
 // of the same size as the input arrays.
-
+namespace {
 struct CrossProductOp {
 	template <class TYPE>
 	static void Operation(const TYPE *lhs_data, const TYPE *rhs_data, TYPE *res_data, idx_t size) {
@@ -79,17 +81,18 @@ struct CrossProductOp {
 		res_data[2] = lx * ry - ly * rx;
 	}
 };
+} // namespace
 
 template <class TYPE, class OP, idx_t N>
 static void ArrayFixedCombine(DataChunk &args, ExpressionState &state, Vector &result) {
 	const auto &lstate = state.Cast<ExecuteFunctionState>();
 	const auto &expr = lstate.expr.Cast<BoundFunctionExpression>();
-	const auto &func_name = expr.function.name;
+	const auto &func_name = expr.Function().GetName();
 
 	const auto count = args.size();
-	auto &lhs_child = ArrayVector::GetEntry(args.data[0]);
-	auto &rhs_child = ArrayVector::GetEntry(args.data[1]);
-	auto &res_child = ArrayVector::GetEntry(result);
+	auto &lhs_child = ArrayVector::GetChildMutable(args.data[0]);
+	auto &rhs_child = ArrayVector::GetChildMutable(args.data[1]);
+	auto &res_child = ArrayVector::GetChildMutable(result);
 
 	const auto &lhs_child_validity = FlatVector::Validity(lhs_child);
 	const auto &rhs_child_validity = FlatVector::Validity(rhs_child);
@@ -97,12 +100,12 @@ static void ArrayFixedCombine(DataChunk &args, ExpressionState &state, Vector &r
 	UnifiedVectorFormat lhs_format;
 	UnifiedVectorFormat rhs_format;
 
-	args.data[0].ToUnifiedFormat(count, lhs_format);
-	args.data[1].ToUnifiedFormat(count, rhs_format);
+	args.data[0].ToUnifiedFormat(lhs_format);
+	args.data[1].ToUnifiedFormat(rhs_format);
 
 	auto lhs_data = FlatVector::GetData<TYPE>(lhs_child);
 	auto rhs_data = FlatVector::GetData<TYPE>(rhs_child);
-	auto res_data = FlatVector::GetData<TYPE>(res_child);
+	auto res_data = FlatVector::GetDataMutable<TYPE>(res_child);
 
 	for (idx_t i = 0; i < count; i++) {
 		const auto lhs_idx = lhs_format.sel->get_index(i);
@@ -146,11 +149,11 @@ template <class TYPE, class OP>
 static void ArrayGenericFold(DataChunk &args, ExpressionState &state, Vector &result) {
 	const auto &lstate = state.Cast<ExecuteFunctionState>();
 	const auto &expr = lstate.expr.Cast<BoundFunctionExpression>();
-	const auto &func_name = expr.function.name;
+	const auto &func_name = expr.Function().GetName();
 
 	const auto count = args.size();
-	auto &lhs_child = ArrayVector::GetEntry(args.data[0]);
-	auto &rhs_child = ArrayVector::GetEntry(args.data[1]);
+	auto &lhs_child = ArrayVector::GetChildMutable(args.data[0]);
+	auto &rhs_child = ArrayVector::GetChildMutable(args.data[1]);
 
 	const auto &lhs_child_validity = FlatVector::Validity(lhs_child);
 	const auto &rhs_child_validity = FlatVector::Validity(rhs_child);
@@ -158,12 +161,12 @@ static void ArrayGenericFold(DataChunk &args, ExpressionState &state, Vector &re
 	UnifiedVectorFormat lhs_format;
 	UnifiedVectorFormat rhs_format;
 
-	args.data[0].ToUnifiedFormat(count, lhs_format);
-	args.data[1].ToUnifiedFormat(count, rhs_format);
+	args.data[0].ToUnifiedFormat(lhs_format);
+	args.data[1].ToUnifiedFormat(rhs_format);
 
 	auto lhs_data = FlatVector::GetData<TYPE>(lhs_child);
 	auto rhs_data = FlatVector::GetData<TYPE>(rhs_child);
-	auto res_data = FlatVector::GetData<TYPE>(result);
+	auto res_data = FlatVector::GetDataMutable<TYPE>(result);
 
 	const auto array_size = ArrayType::GetSize(args.data[0].GetType());
 	D_ASSERT(array_size == ArrayType::GetSize(args.data[1].GetType()));
@@ -211,11 +214,11 @@ static void AddArrayFoldFunction(ScalarFunctionSet &set, const LogicalType &type
 	const auto array = LogicalType::ARRAY(type, optional_idx());
 	if (type.id() == LogicalTypeId::FLOAT) {
 		ScalarFunction function({array, array}, type, ArrayGenericFold<float, OP>, ArrayGenericBinaryBind);
-		BaseScalarFunction::SetReturnsError(function);
+		function.SetFallible();
 		set.AddFunction(function);
 	} else if (type.id() == LogicalTypeId::DOUBLE) {
 		ScalarFunction function({array, array}, type, ArrayGenericFold<double, OP>, ArrayGenericBinaryBind);
-		BaseScalarFunction::SetReturnsError(function);
+		function.SetFallible();
 		set.AddFunction(function);
 	} else {
 		throw NotImplementedException("Array function not implemented for type %s", type.ToString());
@@ -272,7 +275,7 @@ ScalarFunctionSet ArrayCrossProductFun::GetFunctions() {
 	set.AddFunction(
 	    ScalarFunction({double_array, double_array}, double_array, ArrayFixedCombine<double, CrossProductOp, 3>));
 	for (auto &func : set.functions) {
-		BaseScalarFunction::SetReturnsError(func);
+		func.SetFallible();
 	}
 	return set;
 }

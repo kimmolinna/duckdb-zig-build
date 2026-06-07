@@ -13,10 +13,10 @@
 #include "thrift/transport/TBufferTransports.h"
 
 #include "duckdb.hpp"
-#ifndef DUCKDB_AMALGAMATION
+#include "duckdb/storage/external_file_cache/caching_file_system.hpp"
+#include "duckdb/storage/external_file_cache/file_buffer_handle_group.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/allocator.hpp"
-#endif
 
 namespace duckdb {
 
@@ -28,28 +28,53 @@ struct ReadHead {
 	uint64_t size;
 
 	// Current info
-	AllocatedData data;
+	FileBufferHandleGroup handle_group;
+	AllocatedData local_buffer;
+	const_data_ptr_t buffer_ptr = nullptr;
 	bool data_isset = false;
 
 	idx_t GetEnd() const {
 		return size + location;
 	}
 
-	void Allocate(Allocator &allocator) {
-		data = allocator.Allocate(size);
+	// Materialize [buffer_ptr], should call before access.
+	// TODO(hjiang): Currently it's only used for `Prefetch` operation, should be able to save one copy.
+	void Materialize(Allocator &allocator) {
+		if (handle_group.GetHandles().size() == 1) {
+			buffer_ptr = handle_group.Ptr();
+		} else {
+			local_buffer = allocator.Allocate(size);
+			handle_group.CopyTo(local_buffer.get(), size);
+			buffer_ptr = local_buffer.get();
+		}
+	}
+
+	void Fetch(CachingFileHandle &file_handle) {
+		if (GetEnd() > file_handle.GetFileSize()) {
+			throw std::runtime_error("Prefetch registered requested for bytes outside file");
+		}
+		handle_group = file_handle.Read(size, location);
+		Materialize(file_handle.GetBufferAllocator());
+		data_isset = true;
 	}
 };
 
-// Comparator for ReadHeads that are either overlapping, adjacent, or within ALLOW_GAP bytes from each other
 struct ReadHeadComparator {
-	static constexpr uint64_t ALLOW_GAP = 1 << 14; // 16 KiB
+	static constexpr uint64_t DEFAULT_ACCEPTED_COLUMN_GAP = 1 << 14; // 16 KiB
+
+	ReadHeadComparator() = default;
+	explicit ReadHeadComparator(uint64_t accepted_column_gap_p) : accepted_column_gap(accepted_column_gap_p) {
+	}
+
+	uint64_t accepted_column_gap = DEFAULT_ACCEPTED_COLUMN_GAP;
+
 	bool operator()(const ReadHead *a, const ReadHead *b) const {
 		auto a_start = a->location;
 		auto a_end = a->location + a->size;
 		auto b_start = b->location;
 
-		if (a_end <= NumericLimits<idx_t>::Maximum() - ALLOW_GAP) {
-			a_end += ALLOW_GAP;
+		if (a_end <= NumericLimits<idx_t>::Maximum() - accepted_column_gap) {
+			a_end += accepted_column_gap;
 		}
 
 		return a_start < b_start && a_end < b_start;
@@ -60,7 +85,9 @@ struct ReadHeadComparator {
 // 1: register all ranges that will be read, merging ranges that are consecutive
 // 2: prefetch all registered ranges
 struct ReadAheadBuffer {
-	ReadAheadBuffer(Allocator &allocator, FileHandle &handle) : allocator(allocator), handle(handle) {
+	explicit ReadAheadBuffer(CachingFileHandle &file_handle_p,
+	                         uint64_t accepted_column_gap = ReadHeadComparator::DEFAULT_ACCEPTED_COLUMN_GAP)
+	    : merge_set(ReadHeadComparator(accepted_column_gap)), file_handle(file_handle_p) {
 	}
 
 	// The list of read heads
@@ -68,10 +95,14 @@ struct ReadAheadBuffer {
 	// Set for merging consecutive ranges
 	std::set<ReadHead *, ReadHeadComparator> merge_set;
 
-	Allocator &allocator;
-	FileHandle &handle;
+	CachingFileHandle &file_handle;
 
 	idx_t total_size = 0;
+
+	void SetAcceptedColumnGap(uint64_t accepted_column_gap) {
+		D_ASSERT(merge_set.empty());
+		merge_set = std::set<ReadHead *, ReadHeadComparator>(ReadHeadComparator(accepted_column_gap));
+	}
 
 	// Add a read head to the prefetching list
 	void AddReadHead(idx_t pos, uint64_t len, bool merge_buffers = true) {
@@ -97,11 +128,11 @@ struct ReadAheadBuffer {
 			merge_set.insert(&read_head);
 		}
 
-		if (read_head.GetEnd() > handle.GetFileSize()) {
-			throw std::runtime_error("Prefetch registered for bytes outside file: " + handle.GetPath() +
+		if (read_head.GetEnd() > file_handle.GetFileSize()) {
+			throw std::runtime_error("Prefetch registered for bytes outside file: " + file_handle.GetPath() +
 			                         ", attempted range: [" + std::to_string(pos) + ", " +
 			                         std::to_string(read_head.GetEnd()) +
-			                         "), file size: " + std::to_string(handle.GetFileSize()));
+			                         "), file size: " + std::to_string(file_handle.GetFileSize()));
 		}
 	}
 
@@ -118,14 +149,7 @@ struct ReadAheadBuffer {
 	// Prefetch all read heads
 	void Prefetch() {
 		for (auto &read_head : read_heads) {
-			read_head.Allocate(allocator);
-
-			if (read_head.GetEnd() > handle.GetFileSize()) {
-				throw std::runtime_error("Prefetch registered requested for bytes outside file");
-			}
-
-			handle.Read(read_head.data.get(), read_head.size, read_head.location);
-			read_head.data_isset = true;
+			read_head.Fetch(file_handle);
 		}
 	}
 };
@@ -134,9 +158,19 @@ class ThriftFileTransport : public duckdb_apache::thrift::transport::TVirtualTra
 public:
 	static constexpr uint64_t PREFETCH_FALLBACK_BUFFERSIZE = 1000000;
 
-	ThriftFileTransport(Allocator &allocator, FileHandle &handle_p, bool prefetch_mode_p)
-	    : handle(handle_p), location(0), allocator(allocator), ra_buffer(ReadAheadBuffer(allocator, handle_p)),
-	      prefetch_mode(prefetch_mode_p) {
+	ThriftFileTransport(CachingFileHandle &file_handle_p, bool prefetch_mode_p,
+	                    uint64_t accepted_column_gap = ReadHeadComparator::DEFAULT_ACCEPTED_COLUMN_GAP)
+	    : file_handle(file_handle_p), location(0), size(file_handle.GetFileSize()),
+	      ra_buffer(ReadAheadBuffer(file_handle, accepted_column_gap)), prefetch_mode(prefetch_mode_p) {
+	}
+
+	void SetAcceptedColumnGap(uint64_t accepted_column_gap) {
+		ra_buffer.SetAcceptedColumnGap(accepted_column_gap);
+	}
+
+	// The accepted column gap currently used to coalesce adjacent ranges.
+	uint64_t GetAcceptedColumnGap() const {
+		return ra_buffer.merge_set.key_comp().accepted_column_gap;
 	}
 
 	uint32_t read(uint8_t *buf, uint32_t len) {
@@ -145,21 +179,19 @@ public:
 			D_ASSERT(location - prefetch_buffer->location + len <= prefetch_buffer->size);
 
 			if (!prefetch_buffer->data_isset) {
-				prefetch_buffer->Allocate(allocator);
-				handle.Read(prefetch_buffer->data.get(), prefetch_buffer->size, prefetch_buffer->location);
-				prefetch_buffer->data_isset = true;
+				prefetch_buffer->Fetch(file_handle);
 			}
-			memcpy(buf, prefetch_buffer->data.get() + location - prefetch_buffer->location, len);
+			memcpy(buf, prefetch_buffer->buffer_ptr + location - prefetch_buffer->location, len);
+		} else if (prefetch_mode && len < PREFETCH_FALLBACK_BUFFERSIZE && len > 0) {
+			Prefetch(location, MinValue<uint64_t>(PREFETCH_FALLBACK_BUFFERSIZE, file_handle.GetFileSize() - location));
+			auto prefetch_buffer_fallback = ra_buffer.GetReadHead(location);
+			D_ASSERT(location - prefetch_buffer_fallback->location + len <= prefetch_buffer_fallback->size);
+			memcpy(buf, prefetch_buffer_fallback->buffer_ptr + location - prefetch_buffer_fallback->location, len);
 		} else {
-			if (prefetch_mode && len < PREFETCH_FALLBACK_BUFFERSIZE && len > 0) {
-				Prefetch(location, MinValue<uint64_t>(PREFETCH_FALLBACK_BUFFERSIZE, handle.GetFileSize() - location));
-				auto prefetch_buffer_fallback = ra_buffer.GetReadHead(location);
-				D_ASSERT(location - prefetch_buffer_fallback->location + len <= prefetch_buffer_fallback->size);
-				memcpy(buf, prefetch_buffer_fallback->data.get() + location - prefetch_buffer_fallback->location, len);
-			} else {
-				handle.Read(buf, len, location);
-			}
+			// No prefetch, do a regular (non-caching) read
+			file_handle.GetFileHandle().Read(context, buf, len, location);
 		}
+
 		location += len;
 		return len;
 	}
@@ -195,22 +227,40 @@ public:
 		location += skip_count;
 	}
 
+	bool HasPrefetch() const {
+		return !ra_buffer.read_heads.empty() || !ra_buffer.merge_set.empty();
+	}
+
 	void SetLocation(idx_t location_p) {
 		location = location_p;
 	}
 
-	idx_t GetLocation() {
+	idx_t GetLocation() const {
 		return location;
 	}
-	idx_t GetSize() {
-		return handle.file_system.GetFileSize(handle);
+
+	optional_ptr<ReadHead> GetReadHead(idx_t pos) {
+		return ra_buffer.GetReadHead(pos);
+	}
+
+	std::list<ReadHead> &GetReadHeads() {
+		return ra_buffer.read_heads;
+	}
+
+	CachingFileHandle &GetCachingFileHandle() const {
+		return file_handle;
+	}
+
+	idx_t GetSize() const {
+		return size;
 	}
 
 private:
-	FileHandle &handle;
-	idx_t location;
+	QueryContext context;
 
-	Allocator &allocator;
+	CachingFileHandle &file_handle;
+	idx_t location;
+	idx_t size;
 
 	// Multi-buffer prefetch
 	ReadAheadBuffer ra_buffer;

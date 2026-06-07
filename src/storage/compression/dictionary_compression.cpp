@@ -4,8 +4,6 @@
 
 #include "duckdb/common/bitpacking.hpp"
 #include "duckdb/common/numeric_utils.hpp"
-#include "duckdb/common/operator/comparison_operators.hpp"
-#include "duckdb/common/string_map_set.hpp"
 #include "duckdb/common/types/vector_buffer.hpp"
 #include "duckdb/function/compression/compression.hpp"
 #include "duckdb/function/compression_function.hpp"
@@ -49,15 +47,15 @@ namespace duckdb {
 
 struct DictionaryCompressionStorage {
 	static unique_ptr<AnalyzeState> StringInitAnalyze(ColumnData &col_data, PhysicalType type);
-	static bool StringAnalyze(AnalyzeState &state_p, Vector &input, idx_t count);
+	static bool StringAnalyze(AnalyzeState &state_p, const Vector &input);
 	static idx_t StringFinalAnalyze(AnalyzeState &state_p);
 
 	static unique_ptr<CompressionState> InitCompression(ColumnDataCheckpointData &checkpoint_data,
 	                                                    unique_ptr<AnalyzeState> state);
-	static void Compress(CompressionState &state_p, Vector &scan_vector, idx_t count);
+	static void Compress(CompressionState &state_p, const Vector &scan_vector);
 	static void FinalizeCompress(CompressionState &state_p);
 
-	static unique_ptr<SegmentScanState> StringInitScan(ColumnSegment &segment);
+	static unique_ptr<SegmentScanState> StringInitScan(const QueryContext &context, ColumnSegment &segment);
 	template <bool ALLOW_DICT_VECTORS>
 	static void StringScanPartial(ColumnSegment &segment, ColumnScanState &state, idx_t scan_count, Vector &result,
 	                              idx_t result_offset);
@@ -70,18 +68,26 @@ struct DictionaryCompressionStorage {
 // Analyze
 //===--------------------------------------------------------------------===//
 unique_ptr<AnalyzeState> DictionaryCompressionStorage::StringInitAnalyze(ColumnData &col_data, PhysicalType type) {
-	CompressionInfo info(col_data.GetBlockManager().GetBlockSize());
-	return make_uniq<DictionaryCompressionAnalyzeState>(info);
+	auto &storage_manager = col_data.GetStorageManager();
+	if (StorageManager::TargetAtLeastVersion(StorageVersion::V1_3_0, storage_manager.GetStorageVersion())) {
+		// dict_fsst introduced - disable dictionary
+		return nullptr;
+	}
+
+	return make_uniq<DictionaryAnalyzeState>(col_data.GetBlockManager());
 }
 
-bool DictionaryCompressionStorage::StringAnalyze(AnalyzeState &state_p, Vector &input, idx_t count) {
-	auto &state = state_p.Cast<DictionaryCompressionAnalyzeState>();
-	return state.analyze_state->UpdateState(input, count);
+bool DictionaryCompressionStorage::StringAnalyze(AnalyzeState &state_p, const Vector &input) {
+	auto &state = state_p.Cast<DictionaryAnalyzeState>();
+	return DictionaryCompression::UpdateState(state, input);
 }
 
 idx_t DictionaryCompressionStorage::StringFinalAnalyze(AnalyzeState &state_p) {
-	auto &analyze_state = state_p.Cast<DictionaryCompressionAnalyzeState>();
-	auto &state = *analyze_state.analyze_state;
+	auto &state = state_p.Cast<DictionaryAnalyzeState>();
+
+	if (state.current_tuple_count != 0) {
+		state.UpdateMaxUniqueCount();
+	}
 
 	auto width = BitpackingPrimitives::MinimumBitWidth(state.current_unique_count + 1);
 	auto req_space = DictionaryCompression::RequiredSpace(state.current_tuple_count, state.current_unique_count,
@@ -95,13 +101,14 @@ idx_t DictionaryCompressionStorage::StringFinalAnalyze(AnalyzeState &state_p) {
 // Compress
 //===--------------------------------------------------------------------===//
 unique_ptr<CompressionState> DictionaryCompressionStorage::InitCompression(ColumnDataCheckpointData &checkpoint_data,
-                                                                           unique_ptr<AnalyzeState> state) {
-	return make_uniq<DictionaryCompressionCompressState>(checkpoint_data, state->info);
+                                                                           unique_ptr<AnalyzeState> state_p) {
+	const auto &state = state_p->Cast<DictionaryAnalyzeState>();
+	return make_uniq<DictionaryCompressionCompressState>(checkpoint_data, state.max_unique_count_across_segments);
 }
 
-void DictionaryCompressionStorage::Compress(CompressionState &state_p, Vector &scan_vector, idx_t count) {
+void DictionaryCompressionStorage::Compress(CompressionState &state_p, const Vector &scan_vector) {
 	auto &state = state_p.Cast<DictionaryCompressionCompressState>();
-	state.UpdateState(scan_vector, count);
+	DictionaryCompression::UpdateState(state, scan_vector);
 }
 
 void DictionaryCompressionStorage::FinalizeCompress(CompressionState &state_p) {
@@ -112,9 +119,10 @@ void DictionaryCompressionStorage::FinalizeCompress(CompressionState &state_p) {
 //===--------------------------------------------------------------------===//
 // Scan
 //===--------------------------------------------------------------------===//
-unique_ptr<SegmentScanState> DictionaryCompressionStorage::StringInitScan(ColumnSegment &segment) {
-	auto &buffer_manager = BufferManager::GetBufferManager(segment.db);
-	auto state = make_uniq<CompressedStringScanState>(buffer_manager.Pin(segment.block));
+unique_ptr<SegmentScanState> DictionaryCompressionStorage::StringInitScan(const QueryContext &context,
+                                                                          ColumnSegment &segment) {
+	auto &buffer_manager = BufferManager::GetBufferManager(segment.GetDatabase());
+	auto state = make_uniq<CompressedStringScanState>(buffer_manager.Pin(segment.GetBlockHandle()));
 	state->Initialize(segment, true);
 	return std::move(state);
 }
@@ -128,9 +136,8 @@ void DictionaryCompressionStorage::StringScanPartial(ColumnSegment &segment, Col
 	// clear any previously locked buffers and get the primary buffer handle
 	auto &scan_state = state.scan_state->Cast<CompressedStringScanState>();
 
-	auto start = segment.GetRelativeIndex(state.row_index);
-	if (!ALLOW_DICT_VECTORS || scan_count != STANDARD_VECTOR_SIZE ||
-	    start % BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE != 0) {
+	auto start = state.GetPositionInSegment();
+	if (!ALLOW_DICT_VECTORS || scan_count != STANDARD_VECTOR_SIZE) {
 		scan_state.ScanToFlatVector(result, result_offset, start, scan_count);
 	} else {
 		scan_state.ScanToDictionaryVector(segment, result, result_offset, start, scan_count);

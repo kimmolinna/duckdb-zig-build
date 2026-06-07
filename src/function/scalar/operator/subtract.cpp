@@ -6,7 +6,6 @@
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/interval.hpp"
-#include "duckdb/common/types/value.hpp"
 
 namespace duckdb {
 
@@ -32,7 +31,7 @@ int64_t SubtractOperator::Operation(date_t left, date_t right) {
 
 template <>
 date_t SubtractOperator::Operation(date_t left, int32_t right) {
-	if (!Date::IsFinite(left)) {
+	if (!left.IsFinite()) {
 		return left;
 	}
 	int32_t days;
@@ -41,7 +40,7 @@ date_t SubtractOperator::Operation(date_t left, int32_t right) {
 	}
 
 	date_t result(days);
-	if (!Date::IsFinite(result)) {
+	if (!result.IsFinite()) {
 		throw OutOfRangeException("Date out of range");
 	}
 	return result;
@@ -77,9 +76,19 @@ interval_t SubtractOperator::Operation(timestamp_t left, timestamp_t right) {
 	return Interval::GetDifference(left, right);
 }
 
+template <>
+int64_t SubtractOperator::Operation(timestamp_t left, timestamp_t right) {
+	int64_t result;
+	if (!TrySubtractOperator::Operation(left, right, result)) {
+		throw OutOfRangeException("Overflow in timestamp subtraction");
+	}
+	return result;
+}
+
 //===--------------------------------------------------------------------===//
 // - [subtract] with overflow check
 //===--------------------------------------------------------------------===//
+namespace {
 struct OverflowCheckedSubtract {
 	template <class SRCTYPE, class UTYPE>
 	static inline bool Operation(SRCTYPE left, SRCTYPE right, SRCTYPE &result) {
@@ -91,6 +100,7 @@ struct OverflowCheckedSubtract {
 		return true;
 	}
 };
+} // namespace
 
 template <>
 bool TrySubtractOperator::Operation(uint8_t left, uint8_t right, uint8_t &result) {
@@ -176,7 +186,7 @@ bool TrySubtractOperator::Operation(uhugeint_t left, uhugeint_t right, uhugeint_
 // subtract decimal with overflow check
 //===--------------------------------------------------------------------===//
 template <class T, T min, T max>
-bool TryDecimalSubtractTemplated(T left, T right, T &result) {
+static bool TryDecimalSubtractTemplated(T left, T right, T &result) {
 	if (right < 0) {
 		if (max + right < left) {
 			return false;

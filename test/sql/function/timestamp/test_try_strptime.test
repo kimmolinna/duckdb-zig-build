@@ -2,9 +2,6 @@
 # description: Test try_strptime function
 # group: [timestamp]
 
-statement ok
-PRAGMA enable_verification
-
 query I
 SELECT try_strptime('21 June, 2018', '%d %B, %Y')
 ----
@@ -645,7 +642,7 @@ SELECT try_strptime('20 1950', '%V %Y')
 query I
 SELECT try_strptime('2021 19', '%Y %V')
 ----
-2021-01-01 00:00:00
+NULL
 
 # AM/PM out of range
 query I

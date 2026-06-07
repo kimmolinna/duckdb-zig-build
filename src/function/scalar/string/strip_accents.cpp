@@ -27,9 +27,11 @@ bool IsAscii(const char *input, idx_t n) {
 	return true;
 }
 
+namespace {
+
 struct StripAccentsOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		if (IsAscii(input.GetData(), input.GetSize())) {
 			return input;
 		}
@@ -37,18 +39,20 @@ struct StripAccentsOperator {
 		// non-ascii, perform collation
 		auto stripped = utf8proc_remove_accents((const utf8proc_uint8_t *)input.GetData(),
 		                                        UnsafeNumericCast<utf8proc_ssize_t>(input.GetSize()));
-		auto result_str = StringVector::AddString(result, const_char_ptr_cast(stripped));
+		auto result_str = heap.AddString(const_char_ptr_cast(stripped));
 		free(stripped);
 		return result_str;
 	}
 };
 
-static void StripAccentsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+void StripAccentsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	D_ASSERT(args.ColumnCount() == 1);
 
-	UnaryExecutor::ExecuteString<string_t, string_t, StripAccentsOperator>(args.data[0], result, args.size());
+	UnaryExecutor::ExecuteString<string_t, string_t, StripAccentsOperator>(args.data[0], result);
 	StringVector::AddHeapReference(result, args.data[0]);
 }
+
+} // namespace
 
 ScalarFunction StripAccentsFun::GetFunction() {
 	return ScalarFunction("strip_accents", {LogicalType::VARCHAR}, LogicalType::VARCHAR, StripAccentsFunction);

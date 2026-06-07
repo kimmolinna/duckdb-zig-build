@@ -8,13 +8,24 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include "duckdb.hpp"
 #include "parquet_rle_bp_decoder.hpp"
 #include "resizable_buffer.hpp"
+#include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/typedefs.hpp"
+#include "duckdb/common/types.hpp"
+#include "duckdb/common/types/selection_vector.hpp"
+#include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/planner/table_filter.hpp"
 
 namespace duckdb {
 class ColumnReader;
 struct TableFilterState;
+class DictionaryEntry;
+class ResizeableBuffer;
+class Vector;
 
 class DictionaryDecoder {
 public:
@@ -26,7 +37,8 @@ public:
 	void InitializePage();
 	idx_t Read(uint8_t *defines, idx_t read_count, Vector &result, idx_t result_offset);
 	void Skip(uint8_t *defines, idx_t skip_count);
-	bool CanFilter(const TableFilter &filter);
+	bool CanFilter(const TableFilter &filter, TableFilterState &filter_state);
+	bool DictionarySupportsFilter(const TableFilter &filter, TableFilterState &filter_state);
 	void Filter(uint8_t *defines, idx_t read_count, Vector &result, SelectionVector &sel, idx_t &approved_tuple_count);
 	bool HasFilter() const {
 		return filter_result.get();
@@ -46,11 +58,10 @@ private:
 	SelectionVector valid_sel;
 	SelectionVector dictionary_selection_vector;
 	idx_t dictionary_size;
-	unique_ptr<Vector> dictionary;
+	buffer_ptr<DictionaryEntry> dictionary;
 	unsafe_unique_array<bool> filter_result;
 	idx_t filter_count;
 	bool can_have_nulls;
-	string dictionary_id;
 };
 
 } // namespace duckdb

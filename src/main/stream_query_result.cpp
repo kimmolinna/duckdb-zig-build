@@ -69,7 +69,7 @@ static bool ExecutionErrorOccurred(StreamExecutionResult result) {
 	return false;
 }
 
-unique_ptr<DataChunk> StreamQueryResult::FetchInternal(ClientContextLock &lock) {
+unique_ptr<DataChunk> StreamQueryResult::FetchNextInternal(ClientContextLock &lock) {
 	bool invalidate_query = true;
 	unique_ptr<DataChunk> chunk;
 	try {
@@ -91,11 +91,8 @@ unique_ptr<DataChunk> StreamQueryResult::FetchInternal(ClientContextLock &lock) 
 			invalidate_query = false;
 		} else if (Exception::InvalidatesDatabase(error.Type())) {
 			// fatal exceptions invalidate the entire database
-			auto &config = context->config;
-			if (!config.query_verification_enabled) {
-				auto &db_instance = DatabaseInstance::GetDatabase(*context);
-				ValidChecker::Invalidate(db_instance, error.RawMessage());
-			}
+			auto &db_instance = DatabaseInstance::GetDatabase(*context);
+			ValidChecker::Invalidate(db_instance, error.RawMessage());
 		}
 		context->ProcessError(error, context->GetCurrentQuery());
 		SetError(std::move(error));
@@ -106,12 +103,12 @@ unique_ptr<DataChunk> StreamQueryResult::FetchInternal(ClientContextLock &lock) 
 	return nullptr;
 }
 
-unique_ptr<DataChunk> StreamQueryResult::FetchRaw() {
+unique_ptr<DataChunk> StreamQueryResult::FetchInternal() {
 	unique_ptr<DataChunk> chunk;
 	{
 		auto lock = LockContext();
 		CheckExecutableInternal(*lock);
-		chunk = FetchInternal(*lock);
+		chunk = FetchNextInternal(*lock);
 	}
 	if (!chunk || chunk->ColumnCount() == 0 || chunk->size() == 0) {
 		Close();

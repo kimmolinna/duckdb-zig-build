@@ -2,13 +2,11 @@
 # description: Test attach and re-attach with serialized dependencies
 # group: [attach]
 
-require noforcestorage
-
 statement ok
 set storage_compatibility_version='latest';
 
 statement ok
-attach '__TEST_DIR__/db1.db';
+attach '{TEST_DIR}/db1.db';
 
 statement ok
 use db1;
@@ -23,13 +21,16 @@ statement ok
 CREATE TABLE B(B1 INTEGER REFERENCES A(A1));
 
 statement ok
-use memory;
+attach '{TEST_DIR}/db1_other.db';
+
+statement ok
+USE db1_other;
 
 statement ok
 detach db1;
 
 statement ok
-attach '__TEST_DIR__/db1.db' as other_db;
+attach '{TEST_DIR}/db1.db' as other_db;
 
 # now test with a WAL
 statement ok
@@ -39,7 +40,7 @@ statement ok
 PRAGMA wal_autocheckpoint='1TB';
 
 statement ok
-attach '__TEST_DIR__/db2.db';
+attach '{TEST_DIR}/db2.db';
 
 statement ok
 use db2;
@@ -54,10 +55,10 @@ statement ok
 CREATE TABLE B(B1 INTEGER REFERENCES A(A1));
 
 statement ok
-use memory;
+USE db1_other;
 
 statement ok
 detach db2;
 
 statement ok
-attach '__TEST_DIR__/db2.db' as other_db2;
+attach '{TEST_DIR}/db2.db' as other_db2;

@@ -1,61 +1,44 @@
 #include "duckdb/planner/expression_binder/select_binder.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/planner/query_node/bound_select_node.hpp"
 
 namespace duckdb {
 
-SelectBinder::SelectBinder(Binder &binder, ClientContext &context, BoundSelectNode &node, BoundGroupInformation &info)
-    : BaseSelectBinder(binder, context, node, info) {
+SelectBinder::SelectBinder(Binder &binder, ClientContext &context, BoundSelectNode &node)
+    : BaseSelectBinder(binder, context, node) {
 }
 
-unique_ptr<ParsedExpression> SelectBinder::GetSQLValueFunction(const string &column_name) {
-	auto alias_entry = node.bind_state.alias_map.find(column_name);
-	if (alias_entry != node.bind_state.alias_map.end()) {
-		// don't replace SQL value functions if they are in the alias map
-		return nullptr;
+bool SelectBinder::TryResolveAliasReference(ColumnRefExpression &colref, idx_t depth, bool root_expression,
+                                            BindResult &result, unique_ptr<ParsedExpression> &expr_ptr) {
+	// must be a qualified alias.<name>
+	if (!ExpressionBinder::IsPotentialAlias(colref)) {
+		return false;
 	}
-	return ExpressionBinder::GetSQLValueFunction(column_name);
-}
 
-BindResult SelectBinder::BindColumnRef(unique_ptr<ParsedExpression> &expr_ptr, idx_t depth, bool root_expression) {
-	// first try to bind the column reference regularly
-	auto result = BaseSelectBinder::BindColumnRef(expr_ptr, depth, root_expression);
-	if (!result.HasError()) {
-		return result;
+	const auto &alias_name = colref.ColumnNames().back();
+	auto entry = node.bind_state.alias_map.find(alias_name);
+	if (entry == node.bind_state.alias_map.end()) {
+		return false;
 	}
-	// binding failed
-	// check in the alias map
-	auto &colref = (expr_ptr.get())->Cast<ColumnRefExpression>();
-	if (!colref.IsQualified()) {
-		auto &bind_state = node.bind_state;
-		auto alias_entry = node.bind_state.alias_map.find(colref.column_names[0]);
-		if (alias_entry != node.bind_state.alias_map.end()) {
-			// found entry!
-			auto index = alias_entry->second;
-			if (index >= node.bound_column_count) {
-				throw BinderException("Column \"%s\" referenced that exists in the SELECT clause - but this column "
-				                      "cannot be referenced before it is defined",
-				                      colref.column_names[0]);
-			}
-			if (bind_state.AliasHasSubquery(index)) {
-				throw BinderException("Alias \"%s\" referenced in a SELECT clause - but the expression has a subquery."
-				                      " This is not yet supported.",
-				                      colref.column_names[0]);
-			}
-			auto copied_expression = node.bind_state.BindAlias(index);
-			result = BindExpression(copied_expression, depth, false);
-			return result;
-		}
-	}
-	// entry was not found in the alias map: return the original error
-	return result;
-}
 
-bool SelectBinder::QualifyColumnAlias(const ColumnRefExpression &colref) {
-	if (!colref.IsQualified()) {
-		return node.bind_state.alias_map.find(colref.column_names[0]) != node.bind_state.alias_map.end();
+	auto alias_index = entry->second;
+	// Simple way to prevent circular aliasing (`SELECT alias.y as x, alias.x as y;`)
+	if (alias_index >= node.bound_column_count) {
+		throw BinderException("Column \"%s\" referenced that exists in the SELECT clause - but this column "
+		                      "cannot be referenced before it is defined",
+		                      colref.ColumnNames().back());
 	}
-	return false;
+
+	if (node.bind_state.AliasHasSubquery(alias_index)) {
+		throw BinderException(colref,
+		                      "Alias \"%s\" referenced in a SELECT clause - but the expression has a subquery. This is "
+		                      "not yet supported.",
+		                      alias_name);
+	}
+	auto copied_unbound = node.bind_state.BindAlias(alias_index);
+	result = BindExpression(copied_unbound, depth, false);
+	return true;
 }
 
 } // namespace duckdb

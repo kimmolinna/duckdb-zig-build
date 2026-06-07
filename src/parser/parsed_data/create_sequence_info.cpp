@@ -1,7 +1,4 @@
 #include "duckdb/parser/parsed_data/create_sequence_info.hpp"
-#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/catalog/catalog.hpp"
 
 namespace duckdb {
 
@@ -21,11 +18,12 @@ unique_ptr<CreateInfo> CreateSequenceInfo::Copy() const {
 	result->max_value = max_value;
 	result->start_value = start_value;
 	result->cycle = cycle;
+	result->last_value = last_value;
 	return std::move(result);
 }
 
 string CreateSequenceInfo::ToString() const {
-	std::stringstream ss;
+	duckdb::stringstream ss;
 	ss << "CREATE";
 	if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
 		ss << " OR REPLACE";

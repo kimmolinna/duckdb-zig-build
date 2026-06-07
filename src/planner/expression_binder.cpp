@@ -1,6 +1,5 @@
 #include "duckdb/planner/expression_binder.hpp"
 
-#include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/parser/expression/list.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -8,6 +7,8 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/main/client_config.hpp"
+#include "duckdb/main/settings.hpp"
+#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
@@ -15,25 +16,11 @@ void ExpressionBinder::SetCatalogLookupCallback(catalog_entry_callback_t callbac
 	binder.SetCatalogLookupCallback(std::move(callback));
 }
 
-ExpressionBinder::ExpressionBinder(Binder &binder, ClientContext &context, bool replace_binder)
-    : binder(binder), context(context) {
+ExpressionBinder::ExpressionBinder(Binder &binder, ClientContext &context) : binder(binder), context(context) {
 	InitializeStackCheck();
-	if (replace_binder) {
-		stored_binder = &binder.GetActiveBinder();
-		binder.SetActiveBinder(*this);
-	} else {
-		binder.PushExpressionBinder(*this);
-	}
 }
 
 ExpressionBinder::~ExpressionBinder() {
-	if (binder.HasActiveBinder()) {
-		if (stored_binder) {
-			binder.SetActiveBinder(*stored_binder);
-		} else {
-			binder.PopExpressionBinder();
-		}
-	}
 }
 
 void ExpressionBinder::InitializeStackCheck() {
@@ -47,11 +34,11 @@ void ExpressionBinder::InitializeStackCheck() {
 
 StackChecker<ExpressionBinder> ExpressionBinder::StackCheck(const ParsedExpression &expr, idx_t extra_stack) {
 	D_ASSERT(stack_depth != DConstants::INVALID_INDEX);
-	auto &options = ClientConfig::GetConfig(context);
-	if (stack_depth + extra_stack >= options.max_expression_depth) {
+	auto max_expression_depth = Settings::Get<MaxExpressionDepthSetting>(context);
+	if (stack_depth + extra_stack >= max_expression_depth) {
 		throw BinderException("Max expression depth limit of %lld exceeded. Use \"SET max_expression_depth TO x\" to "
 		                      "increase the maximum expression depth.",
-		                      options.max_expression_depth);
+		                      max_expression_depth);
 	}
 	return StackChecker<ExpressionBinder>(*this, extra_stack);
 }
@@ -70,7 +57,7 @@ BindResult ExpressionBinder::BindExpression(unique_ptr<ParsedExpression> &expr, 
 	case ExpressionClass::COLLATE:
 		return BindExpression(expr_ref.Cast<CollateExpression>(), depth);
 	case ExpressionClass::COLUMN_REF:
-		return BindExpression(expr_ref.Cast<ColumnRefExpression>(), depth, root_expression);
+		return BindExpression(expr_ref.Cast<ColumnRefExpression>(), depth, root_expression, expr);
 	case ExpressionClass::LAMBDA_REF:
 		return BindExpression(expr_ref.Cast<LambdaRefExpression>(), depth);
 	case ExpressionClass::COMPARISON:
@@ -79,17 +66,21 @@ BindResult ExpressionBinder::BindExpression(unique_ptr<ParsedExpression> &expr, 
 		return BindExpression(expr_ref.Cast<ConjunctionExpression>(), depth);
 	case ExpressionClass::CONSTANT:
 		return BindExpression(expr_ref.Cast<ConstantExpression>(), depth);
+	case ExpressionClass::TYPE:
+		return BindExpression(expr_ref.Cast<TypeExpression>(), depth);
 	case ExpressionClass::FUNCTION: {
 		auto &function = expr_ref.Cast<FunctionExpression>();
-		if (IsUnnestFunction(function.function_name)) {
+		if (IsUnnestFunction(function.FunctionName())) {
 			// special case, not in catalog
 			return BindUnnest(function, depth, root_expression);
 		}
 		// binding a function expression requires an extra parameter for macros
 		return BindExpression(function, depth, expr);
 	}
-	case ExpressionClass::LAMBDA:
-		return BindExpression(expr_ref.Cast<LambdaExpression>(), depth, LogicalTypeId::INVALID, nullptr);
+	case ExpressionClass::LAMBDA: {
+		const vector<LogicalType> function_child_types;
+		return BindExpression(expr_ref.Cast<LambdaExpression>(), depth, function_child_types, nullptr, nullptr);
+	}
 	case ExpressionClass::OPERATOR:
 		return BindExpression(expr_ref.Cast<OperatorExpression>(), depth);
 	case ExpressionClass::SUBQUERY:
@@ -101,7 +92,9 @@ BindResult ExpressionBinder::BindExpression(unique_ptr<ParsedExpression> &expr, 
 	case ExpressionClass::STAR:
 		return BindResult(BinderException::Unsupported(expr_ref, "STAR expression is not supported here"));
 	default:
-		throw NotImplementedException("Unimplemented expression class");
+		return BindResult(
+		    NotImplementedException("Unimplemented expression class in ExpressionBinder::BindExpression: %s",
+		                            EnumUtil::ToString(expr_ref.GetExpressionClass())));
 	}
 }
 
@@ -162,7 +155,7 @@ static bool CombineMissingColumns(ErrorData &current, ErrorData new_error) {
 		}
 		auto score = StringUtil::SimilarityRating(candidate_column, column_name);
 		candidates.insert(candidate);
-		scores.emplace_back(make_pair(std::move(candidate), score));
+		scores.emplace_back(std::move(candidate), score);
 	}
 	// get a new top-n
 	auto top_candidates = StringUtil::TopNStrings(scores);
@@ -199,8 +192,6 @@ BindResult ExpressionBinder::BindCorrelatedColumns(unique_ptr<ParsedExpression> 
 	// make a copy of the set of binders, so we can restore it later
 	auto binders = active_binders;
 	auto bind_error = std::move(error_message);
-	// we already failed with the current binder
-	active_binders.pop_back();
 	idx_t depth = 1;
 	while (!active_binders.empty()) {
 		auto &next_binder = active_binders.back().get();
@@ -230,7 +221,7 @@ void ExpressionBinder::BindChild(unique_ptr<ParsedExpression> &expr, idx_t depth
 void ExpressionBinder::ExtractCorrelatedExpressions(Binder &binder, Expression &expr) {
 	if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &bound_colref = expr.Cast<BoundColumnRefExpression>();
-		if (bound_colref.depth > 0) {
+		if (bound_colref.Depth() > 0) {
 			binder.AddCorrelatedColumn(CorrelatedColumnInfo(bound_colref));
 		}
 	}
@@ -334,20 +325,20 @@ unique_ptr<Expression> ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr
 		// the binder has a specific target type: add a cast to that type
 		result = BoundCastExpression::AddCastToType(context, std::move(result), target_type);
 	} else {
-		if (!binder.can_contain_nulls) {
+		if (!binder.CanContainNulls()) {
 			// SQL NULL type is only used internally in the binder
 			// cast to INTEGER if we encounter it outside of the binder
-			if (ContainsNullType(result->return_type)) {
-				auto exchanged_type = ExchangeNullType(result->return_type);
+			if (ContainsNullType(result->GetReturnType())) {
+				auto exchanged_type = ExchangeNullType(result->GetReturnType());
 				result = BoundCastExpression::AddCastToType(context, std::move(result), exchanged_type);
 			}
 		}
-		if (result->return_type.id() == LogicalTypeId::UNKNOWN) {
+		if (result->GetReturnType().id() == LogicalTypeId::UNKNOWN) {
 			throw ParameterNotResolvedException();
 		}
 	}
 	if (result_type) {
-		*result_type = result->return_type;
+		*result_type = result->GetReturnType();
 	}
 	return result;
 }
@@ -360,6 +351,16 @@ ErrorData ExpressionBinder::Bind(unique_ptr<ParsedExpression> &expr, idx_t depth
 	if (expression.GetExpressionClass() == ExpressionClass::BOUND_EXPRESSION) {
 		// already bound, don't bind it again
 		return ErrorData();
+	}
+	if (expression.GetExpressionClass() == ExpressionClass::WINDOW) {
+		auto &w = expression.Cast<WindowExpression>();
+		if (w.HasBoundedParts()) {
+			BindResult result =
+			    BindResult(BinderException::Unsupported(*expr, "window expression is not supported here"));
+			if (result.HasError()) {
+				return std::move(result.error);
+			}
+		}
 	}
 	// bind the expression
 	BindResult result = BindExpression(expr, depth, root_expression);
@@ -394,7 +395,14 @@ bool ExpressionBinder::IsUnnestFunction(const string &function_name) {
 	return function_name == "unnest" || function_name == "unlist";
 }
 
-bool ExpressionBinder::TryBindAlias(ColumnRefExpression &colref, bool root_expression, BindResult &result) {
+bool ExpressionBinder::IsPotentialAlias(const ColumnRefExpression &colref) {
+	// traditional alias (unqualified), or qualified with table name "alias"
+	if (!colref.IsQualified()) {
+		return true;
+	}
+	if (colref.ColumnNames().size() == 2) {
+		return StringUtil::CIEquals(colref.GetTableName(), "alias");
+	}
 	return false;
 }
 

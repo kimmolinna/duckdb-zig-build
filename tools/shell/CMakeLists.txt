@@ -1,24 +1,37 @@
 include_directories(include)
-include_directories(../sqlite3_api_wrapper/include)
-if(NOT WIN32)
-  add_subdirectory(linenoise)
-  add_definitions(-DHAVE_LINENOISE=1)
-  include_directories(../../third_party/utf8proc/include)
-  include_directories(linenoise/include)
-endif()
-set(SHELL_SOURCES ${SHELL_SOURCES} shell.cpp shell_renderer.cpp
-                  shell_highlight.cpp)
 
-option(STATIC_LIBCPP "Statically link CLI to libc++" FALSE)
+add_subdirectory(linenoise)
+add_definitions(-DHAVE_LINENOISE=1)
+include_directories(../../third_party/utf8proc/include)
+include_directories(linenoise/include)
+add_definitions(-DUSE_DUCKDB_SHELL_WRAPPER)
+
+include_directories(../../third_party/utf8proc/include)
+
+set(SHELL_SOURCES
+    ${SHELL_SOURCES}
+    shell_command_line_option.cpp
+    shell_extension.cpp
+    shell.cpp
+    shell_helpers.cpp
+    shell_metadata_command.cpp
+    shell_prompt.cpp
+    shell_renderer.cpp
+    shell_highlight.cpp
+    shell_progress_bar.cpp
+    shell_render_table_metadata.cpp
+    shell_windows.cpp)
 
 add_executable(shell ${SHELL_SOURCES})
-target_link_libraries(shell sqlite3_api_wrapper_static
-                      ${DUCKDB_EXTRA_LINK_FLAGS})
-link_threads(shell)
+
+target_link_libraries(shell duckdb_static ${DUCKDB_EXTRA_LINK_FLAGS})
+link_threads(shell "")
 if(STATIC_LIBCPP)
   message("Statically linking CLI")
   target_link_libraries(shell -static-libstdc++ -static-libgcc)
 endif()
+
+link_extension_libraries(shell "")
 
 if(NOT AMALGAMATION_BUILD AND NOT WIN32)
   target_link_libraries(shell duckdb_utf8proc)
@@ -65,5 +78,7 @@ endif()
 set_target_properties(shell PROPERTIES OUTPUT_NAME duckdb)
 set_target_properties(shell PROPERTIES RUNTIME_OUTPUT_DIRECTORY
                                        ${PROJECT_BINARY_DIR})
+
+duckdb_codesign_for_debugging(shell)
 
 install(TARGETS shell RUNTIME DESTINATION "${INSTALL_BIN_DIR}")

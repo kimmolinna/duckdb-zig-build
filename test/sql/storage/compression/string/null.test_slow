@@ -2,21 +2,19 @@
 # description: Test storage of string columns with compression and many null values
 # group: [string]
 
-# load the DB from disk
-load __TEST_DIR__/test_rle.db
+foreach compression fsst dictionary dict_fsst
 
 statement ok
-pragma enable_verification
+SET storage_compatibility_version='v1.0.0'
 
-foreach compression fsst dictionary
+onlyif compression=dict_fsst
+statement ok
+SET storage_compatibility_version='v1.3.0'
 
-foreach enable_fsst_vector true false
+load {TEST_DIR}/test_null_{compression}.db
 
 statement ok
-SET enable_fsst_vectors='${enable_fsst_vector}'
-
-statement ok
-PRAGMA force_compression='${compression}'
+PRAGMA force_compression='{compression}'
 
 # single NULL value
 statement ok
@@ -60,23 +58,13 @@ statement ok
 select compression from pragma_storage_info('nulls') WHERE segment_type ILIKE 'VARCHAR' LIMIT 1;
 
 query I
-select current_setting('force_compression') ILIKE '${compression}'
+select current_setting('force_compression') ILIKE '{compression}'
 ----
 true
 
-query I
-SELECT
-	compression ILIKE 'uncompressed' or
-	(
-		compression ILIKE 'dictionary' and '${compression}'='dictionary'
-	)
-	FROM pragma_storage_info('nulls') WHERE segment_type ILIKE 'VARCHAR' LIMIT 1
-----
-1
-
 # mix with non-null values
 statement ok
-INSERT INTO nulls VALUES (1), (1), (1), (2), (2), (2)
+CREATE OR REPLACE TABLE nulls AS FROM nulls UNION ALL VALUES (1), (1), (1), (2), (2), (2)
 
 query III
 SELECT COUNT(*), COUNT(i::INT), SUM(i::INT) FROM nulls
@@ -94,12 +82,9 @@ statement ok
 CHECKPOINT
 
 query I
-SELECT lower(compression)='${compression}' FROM pragma_storage_info('nulls') WHERE segment_type ILIKE 'VARCHAR' LIMIT 1
+SELECT lower(compression)='{compression}' FROM pragma_storage_info('nulls') WHERE segment_type ILIKE 'VARCHAR' LIMIT 1
 ----
 1
-
-# enable_fsst_vector
-endloop
 
 # compression
 endloop

@@ -43,15 +43,15 @@ BoundStatement Binder::Bind(ExecuteStatement &stmt) {
 		if (is_literal) {
 			auto &constant = bound_expr->Cast<BoundConstantExpression>();
 			LogicalType return_type;
-			if (constant.return_type == LogicalTypeId::VARCHAR &&
-			    StringType::GetCollation(constant.return_type).empty()) {
+			if (constant.GetReturnType() == LogicalTypeId::VARCHAR &&
+			    StringType::GetCollation(constant.GetReturnType()).empty()) {
 				return_type = LogicalTypeId::STRING_LITERAL;
-			} else if (constant.return_type.IsIntegral()) {
-				return_type = LogicalType::INTEGER_LITERAL(constant.value);
+			} else if (constant.GetReturnType().IsIntegral()) {
+				return_type = LogicalType::INTEGER_LITERAL(constant.GetValueMutable());
 			} else {
-				return_type = constant.value.type();
+				return_type = constant.GetValueMutable().type();
 			}
-			parameter_data = BoundParameterData(std::move(constant.value), std::move(return_type));
+			parameter_data = BoundParameterData(std::move(constant.GetValueMutable()), std::move(return_type));
 		} else {
 			auto value = ExpressionExecutor::EvaluateScalar(context, *bound_expr, true);
 			auto value_type = value.type();
@@ -61,14 +61,25 @@ BoundStatement Binder::Bind(ExecuteStatement &stmt) {
 	}
 	unique_ptr<LogicalOperator> rebound_plan;
 
-	if (prepared->RequireRebind(context, &bind_values)) {
+	RebindQueryInfo rebind = RebindQueryInfo::DO_NOT_REBIND;
+	if (prepared->RequireRebind(context, bind_values)) {
+		rebind = RebindQueryInfo::ATTEMPT_TO_REBIND;
+	}
+	for (auto &state : context.registered_state->States()) {
+		BindPreparedStatementCallbackInfo info {*prepared, bind_values};
+		auto new_rebind = state->OnRebindPreparedStatement(context, info, rebind);
+		if (new_rebind == RebindQueryInfo::ATTEMPT_TO_REBIND) {
+			rebind = RebindQueryInfo::ATTEMPT_TO_REBIND;
+		}
+	}
+	if (rebind == RebindQueryInfo::ATTEMPT_TO_REBIND) {
 		// catalog was modified or statement does not have clear types: rebind the statement before running the execute
 		Planner prepared_planner(context);
 		prepared_planner.parameter_data = bind_values;
 		prepared = prepared_planner.PrepareSQLStatement(entry->second->unbound_statement->Copy());
 		rebound_plan = std::move(prepared_planner.plan);
 		D_ASSERT(prepared->properties.bound_all_parameters);
-		this->bound_tables = prepared_planner.binder->bound_tables;
+		global_binder_state->bound_tables = prepared_planner.binder->global_binder_state->bound_tables;
 	}
 	// copy the properties of the prepared statement into the planner
 	auto &properties = GetStatementProperties();

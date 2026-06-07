@@ -6,6 +6,10 @@
 
 namespace duckdb {
 
+void LogicalOperatorVisitor::VisitOperator(unique_ptr<LogicalOperator> &op) {
+	VisitOperator(*op);
+}
+
 void LogicalOperatorVisitor::VisitOperator(LogicalOperator &op) {
 	VisitOperatorChildren(op);
 	VisitOperatorExpressions(op);
@@ -16,7 +20,7 @@ void LogicalOperatorVisitor::VisitOperatorChildren(LogicalOperator &op) {
 		VisitOperatorWithProjectionMapChildren(op);
 	} else {
 		for (auto &child : op.children) {
-			VisitOperator(*child);
+			VisitOperator(child);
 		}
 	}
 }
@@ -29,18 +33,18 @@ void LogicalOperatorVisitor::VisitOperatorWithProjectionMapChildren(LogicalOpera
 	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
 		auto &join = op.Cast<LogicalJoin>();
-		VisitChildOfOperatorWithProjectionMap(*op.children[0], join.left_projection_map);
-		VisitChildOfOperatorWithProjectionMap(*op.children[1], join.right_projection_map);
+		VisitChildOfOperatorWithProjectionMap(op.children[0], join.left_projection_map);
+		VisitChildOfOperatorWithProjectionMap(op.children[1], join.right_projection_map);
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_ORDER_BY: {
 		auto &order = op.Cast<LogicalOrder>();
-		VisitChildOfOperatorWithProjectionMap(*op.children[0], order.projection_map);
+		VisitChildOfOperatorWithProjectionMap(op.children[0], order.projection_map);
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_FILTER: {
 		auto &filter = op.Cast<LogicalFilter>();
-		VisitChildOfOperatorWithProjectionMap(*op.children[0], filter.projection_map);
+		VisitChildOfOperatorWithProjectionMap(op.children[0], filter.projection_map);
 		break;
 	}
 	default:
@@ -48,21 +52,21 @@ void LogicalOperatorVisitor::VisitOperatorWithProjectionMapChildren(LogicalOpera
 	}
 }
 
-void LogicalOperatorVisitor::VisitChildOfOperatorWithProjectionMap(LogicalOperator &child,
-                                                                   vector<idx_t> &projection_map) {
-	const auto child_bindings_before = child.GetColumnBindings();
+void LogicalOperatorVisitor::VisitChildOfOperatorWithProjectionMap(unique_ptr<LogicalOperator> &child,
+                                                                   vector<ProjectionIndex> &projection_map) {
+	const auto child_bindings_before = child->GetColumnBindings();
 	VisitOperator(child);
 	if (projection_map.empty()) {
 		return; // Nothing to fix here
 	}
 	// Child binding order may have changed due to 'fun'.
-	const auto child_bindings_after = child.GetColumnBindings();
+	const auto child_bindings_after = child->GetColumnBindings();
 	if (child_bindings_before == child_bindings_after) {
 		return; // Nothing changed
 	}
 	// The desired order is 'projection_map' applied to 'child_bindings_before'
 	// We create 'new_projection_map', which ensures this order even if 'child_bindings_after' is different
-	vector<idx_t> new_projection_map;
+	vector<ProjectionIndex> new_projection_map;
 	new_projection_map.reserve(projection_map.size());
 	for (const auto proj_idx_before : projection_map) {
 		auto &desired_binding = child_bindings_before[proj_idx_before];
@@ -78,14 +82,13 @@ void LogicalOperatorVisitor::VisitChildOfOperatorWithProjectionMap(LogicalOperat
 			new_projection_map.clear();
 			break;
 		}
-		new_projection_map.push_back(proj_idx_after);
+		new_projection_map.push_back(ProjectionIndex(proj_idx_after));
 	}
 	projection_map = std::move(new_projection_map);
 }
 
 void LogicalOperatorVisitor::EnumerateExpressions(LogicalOperator &op,
                                                   const std::function<void(unique_ptr<Expression> *child)> &callback) {
-
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_EXPRESSION_GET: {
 		auto &get = op.Cast<LogicalExpressionGet>();
@@ -128,29 +131,52 @@ void LogicalOperatorVisitor::EnumerateExpressions(LogicalOperator &op,
 		for (auto &target : rec.key_targets) {
 			callback(&target);
 		}
+		for (auto &aggregate : rec.payload_aggregates) {
+			callback(&aggregate);
+		}
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_INSERT: {
 		auto &insert = op.Cast<LogicalInsert>();
-		if (insert.on_conflict_condition) {
-			callback(&insert.on_conflict_condition);
+		if (insert.on_conflict_info.on_conflict_condition) {
+			callback(&insert.on_conflict_info.on_conflict_condition);
 		}
-		if (insert.do_update_condition) {
-			callback(&insert.do_update_condition);
+		if (insert.on_conflict_info.do_update_condition) {
+			callback(&insert.on_conflict_info.do_update_condition);
+		}
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN: {
+		auto &join = op.Cast<LogicalDependentJoin>();
+		for (auto &expr : join.duplicate_eliminated_columns) {
+			callback(&expr);
+		}
+		for (auto &cond : join.conditions) {
+			callback(&cond.LeftReference());
+			callback(&cond.RightReference());
+		}
+		for (auto &expr : join.arbitrary_expressions) {
+			callback(&expr);
+		}
+		for (auto &expr : join.expression_children) {
+			callback(&expr);
 		}
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
 	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN:
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
 		auto &join = op.Cast<LogicalComparisonJoin>();
 		for (auto &expr : join.duplicate_eliminated_columns) {
 			callback(&expr);
 		}
 		for (auto &cond : join.conditions) {
-			callback(&cond.left);
-			callback(&cond.right);
+			if (cond.IsComparison()) {
+				callback(&cond.LeftReference());
+				callback(&cond.RightReference());
+			} else {
+				callback(&cond.JoinExpressionReference());
+			}
 		}
 		break;
 	}
@@ -176,6 +202,20 @@ void LogicalOperatorVisitor::EnumerateExpressions(LogicalOperator &op,
 		}
 		break;
 	}
+	case LogicalOperatorType::LOGICAL_MERGE_INTO: {
+		auto &merge_into = op.Cast<LogicalMergeInto>();
+		for (auto &entry : merge_into.actions) {
+			for (auto &action : entry.second) {
+				if (action->condition) {
+					callback(&action->condition);
+				}
+				for (auto &expr : action->expressions) {
+					callback(&expr);
+				}
+			}
+		}
+		break;
+	}
 	default:
 		break;
 	}
@@ -195,9 +235,6 @@ void LogicalOperatorVisitor::VisitExpression(unique_ptr<Expression> *expression)
 	case ExpressionClass::BOUND_AGGREGATE:
 		result = VisitReplace(expr.Cast<BoundAggregateExpression>(), expression);
 		break;
-	case ExpressionClass::BOUND_BETWEEN:
-		result = VisitReplace(expr.Cast<BoundBetweenExpression>(), expression);
-		break;
 	case ExpressionClass::BOUND_CASE:
 		result = VisitReplace(expr.Cast<BoundCaseExpression>(), expression);
 		break;
@@ -206,9 +243,6 @@ void LogicalOperatorVisitor::VisitExpression(unique_ptr<Expression> *expression)
 		break;
 	case ExpressionClass::BOUND_COLUMN_REF:
 		result = VisitReplace(expr.Cast<BoundColumnRefExpression>(), expression);
-		break;
-	case ExpressionClass::BOUND_COMPARISON:
-		result = VisitReplace(expr.Cast<BoundComparisonExpression>(), expression);
 		break;
 	case ExpressionClass::BOUND_CONJUNCTION:
 		result = VisitReplace(expr.Cast<BoundConjunctionExpression>(), expression);
@@ -255,15 +289,10 @@ void LogicalOperatorVisitor::VisitExpressionChildren(Expression &expr) {
 	ExpressionIterator::EnumerateChildren(expr, [&](unique_ptr<Expression> &expr) { VisitExpression(&expr); });
 }
 
-// these are all default methods that can be overriden
+// these are all default methods that can be overridden
 // we don't care about coverage here
 // LCOV_EXCL_START
 unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundAggregateExpression &expr,
-                                                            unique_ptr<Expression> *expr_ptr) {
-	return nullptr;
-}
-
-unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundBetweenExpression &expr,
                                                             unique_ptr<Expression> *expr_ptr) {
 	return nullptr;
 }
@@ -279,11 +308,6 @@ unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundCastExpression 
 }
 
 unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundColumnRefExpression &expr,
-                                                            unique_ptr<Expression> *expr_ptr) {
-	return nullptr;
-}
-
-unique_ptr<Expression> LogicalOperatorVisitor::VisitReplace(BoundComparisonExpression &expr,
                                                             unique_ptr<Expression> *expr_ptr) {
 	return nullptr;
 }

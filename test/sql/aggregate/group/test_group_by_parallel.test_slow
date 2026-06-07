@@ -2,13 +2,11 @@
 # description: Test parallel group by
 # group: [group]
 
-require skip_reload
-
 statement ok
 PRAGMA threads=4
 
 statement ok
-PRAGMA verify_external
+SET debug_force_external=true;
 
 # small number of groups (100)
 statement ok

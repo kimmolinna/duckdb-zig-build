@@ -8,12 +8,16 @@
 
 #pragma once
 
+#include "duckdb/common/enums/metric_type.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/execution/physical_operator_states.hpp"
 #include "duckdb/function/table_function.hpp"
-#include "duckdb/planner/table_filter.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/common/extra_operator_info.hpp"
 #include "duckdb/common/column_index.hpp"
+#include "duckdb/execution/physical_table_scan_enum.hpp"
 
 namespace duckdb {
 
@@ -24,9 +28,10 @@ public:
 
 public:
 	//! Table scan that immediately projects out filter columns that are unused in the remainder of the query plan
-	PhysicalTableScan(vector<LogicalType> types, TableFunction function, unique_ptr<FunctionData> bind_data,
-	                  vector<LogicalType> returned_types, vector<ColumnIndex> column_ids, vector<idx_t> projection_ids,
-	                  vector<string> names, unique_ptr<TableFilterSet> table_filters, idx_t estimated_cardinality,
+	PhysicalTableScan(PhysicalPlan &physical_plan, vector<LogicalType> types, TableFunction function,
+	                  unique_ptr<FunctionData> bind_data, vector<LogicalType> returned_types,
+	                  vector<ColumnIndex> column_ids, vector<idx_t> projection_ids, vector<string> names,
+	                  unique_ptr<TableFilterSet> table_filters, idx_t estimated_cardinality,
 	                  ExtraOperatorInfo extra_info, vector<Value> parameters, virtual_column_map_t virtual_columns);
 
 	//! The table function
@@ -59,11 +64,16 @@ public:
 
 	bool Equals(const PhysicalOperator &other) const override;
 
+	OrderPreservationType SourceOrder() const override {
+		return function.order_preservation_type;
+	}
+
 public:
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
 	OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
 	                                       LocalSourceState &lstate,
 	                                       const OperatorPartitionInfo &partition_info) const override;
@@ -72,10 +82,17 @@ public:
 		return true;
 	}
 	bool ParallelSource() const override;
+	TableFunctionParallelism SourceParallelism() const override;
 
 	bool SupportsPartitioning(const OperatorPartitionInfo &partition_info) const override;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
+
+	void GetMetrics(ClientContext &context, GlobalSourceState &gstate_p, LocalSourceState &lstate,
+	                OperatorMetrics &operator_metrics) const;
+
+private:
+	string GetFilterInfo(const TableFilterSet &filter_set) const;
 };
 
 } // namespace duckdb

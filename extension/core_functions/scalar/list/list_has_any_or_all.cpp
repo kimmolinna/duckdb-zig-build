@@ -6,54 +6,7 @@
 
 namespace duckdb {
 
-static unique_ptr<FunctionData> ListHasAnyOrAllBind(ClientContext &context, ScalarFunction &bound_function,
-                                                    vector<unique_ptr<Expression>> &arguments) {
-
-	arguments[0] = BoundCastExpression::AddArrayCastToList(context, std::move(arguments[0]));
-	arguments[1] = BoundCastExpression::AddArrayCastToList(context, std::move(arguments[1]));
-
-	const auto lhs_is_param = arguments[0]->HasParameter();
-	const auto rhs_is_param = arguments[1]->HasParameter();
-
-	if (lhs_is_param && rhs_is_param) {
-		throw ParameterNotResolvedException();
-	}
-
-	const auto &lhs_list = arguments[0]->return_type;
-	const auto &rhs_list = arguments[1]->return_type;
-
-	if (lhs_is_param) {
-		bound_function.arguments[0] = rhs_list;
-		bound_function.arguments[1] = rhs_list;
-		return nullptr;
-	}
-	if (rhs_is_param) {
-		bound_function.arguments[0] = lhs_list;
-		bound_function.arguments[1] = lhs_list;
-		return nullptr;
-	}
-
-	bound_function.arguments[0] = lhs_list;
-	bound_function.arguments[1] = rhs_list;
-
-	const auto &lhs_child = ListType::GetChildType(bound_function.arguments[0]);
-	const auto &rhs_child = ListType::GetChildType(bound_function.arguments[1]);
-
-	if (lhs_child != LogicalType::SQLNULL && rhs_child != LogicalType::SQLNULL && lhs_child != rhs_child) {
-		LogicalType common_child;
-		if (!LogicalType::TryGetMaxLogicalType(context, lhs_child, rhs_child, common_child)) {
-			throw BinderException("'%s' cannot compare lists of different types: '%s' and '%s'", bound_function.name,
-			                      lhs_child.ToString(), rhs_child.ToString());
-		}
-		bound_function.arguments[0] = LogicalType::LIST(common_child);
-		bound_function.arguments[1] = LogicalType::LIST(common_child);
-	}
-
-	return nullptr;
-}
-
 static void ListHasAnyFunction(DataChunk &args, ExpressionState &, Vector &result) {
-
 	auto &l_vec = args.data[0];
 	auto &r_vec = args.data[1];
 
@@ -67,15 +20,15 @@ static void ListHasAnyFunction(DataChunk &args, ExpressionState &, Vector &resul
 	const auto l_size = ListVector::GetListSize(l_vec);
 	const auto r_size = ListVector::GetListSize(r_vec);
 
-	auto &l_child = ListVector::GetEntry(l_vec);
-	auto &r_child = ListVector::GetEntry(r_vec);
+	auto &l_child = ListVector::GetChildMutable(l_vec);
+	auto &r_child = ListVector::GetChildMutable(r_vec);
 
 	// Setup unified formats for the list elements
 	UnifiedVectorFormat l_child_format;
 	UnifiedVectorFormat r_child_format;
 
-	l_child.ToUnifiedFormat(l_size, l_child_format);
-	r_child.ToUnifiedFormat(r_size, r_child_format);
+	l_child.ToUnifiedFormat(l_child_format);
+	r_child.ToUnifiedFormat(r_child_format);
 
 	// Create the sort keys for the list elements
 	Vector l_sortkey_vec(LogicalType::BLOB, l_size);
@@ -83,8 +36,8 @@ static void ListHasAnyFunction(DataChunk &args, ExpressionState &, Vector &resul
 
 	const OrderModifiers order_modifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST);
 
-	CreateSortKeyHelpers::CreateSortKey(l_child, l_size, order_modifiers, l_sortkey_vec);
-	CreateSortKeyHelpers::CreateSortKey(r_child, r_size, order_modifiers, r_sortkey_vec);
+	CreateSortKeyHelpers::CreateSortKey(l_child, order_modifiers, l_sortkey_vec);
+	CreateSortKeyHelpers::CreateSortKey(r_child, order_modifiers, r_sortkey_vec);
 
 	const auto l_sortkey_ptr = FlatVector::GetData<string_t>(l_sortkey_vec);
 	const auto r_sortkey_ptr = FlatVector::GetData<string_t>(r_sortkey_vec);
@@ -92,7 +45,7 @@ static void ListHasAnyFunction(DataChunk &args, ExpressionState &, Vector &resul
 	string_set_t set;
 
 	BinaryExecutor::Execute<list_entry_t, list_entry_t, bool>(
-	    l_vec, r_vec, result, args.size(), [&](const list_entry_t &l_list, const list_entry_t &r_list) {
+	    l_vec, r_vec, result, [&](const list_entry_t &l_list, const list_entry_t &r_list) {
 		    // Short circuit if either list is empty
 		    if (l_list.length == 0 || r_list.length == 0) {
 			    return false;
@@ -109,7 +62,6 @@ static void ListHasAnyFunction(DataChunk &args, ExpressionState &, Vector &resul
 
 		    // Use the smaller list to build the set
 		    if (r_list.length < l_list.length) {
-
 			    build_list = r_list;
 			    probe_list = l_list;
 
@@ -142,9 +94,8 @@ static void ListHasAnyFunction(DataChunk &args, ExpressionState &, Vector &resul
 }
 
 static void ListHasAllFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-
 	const auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	const auto swap = func_expr.function.name == "<@";
+	const auto swap = func_expr.Function().GetName() == "<@";
 
 	auto &l_vec = args.data[swap ? 1 : 0];
 	auto &r_vec = args.data[swap ? 0 : 1];
@@ -159,15 +110,15 @@ static void ListHasAllFunction(DataChunk &args, ExpressionState &state, Vector &
 	const auto l_size = ListVector::GetListSize(l_vec);
 	const auto r_size = ListVector::GetListSize(r_vec);
 
-	auto &l_child = ListVector::GetEntry(l_vec);
-	auto &r_child = ListVector::GetEntry(r_vec);
+	auto &l_child = ListVector::GetChildMutable(l_vec);
+	auto &r_child = ListVector::GetChildMutable(r_vec);
 
 	// Setup unified formats for the list elements
 	UnifiedVectorFormat build_format;
 	UnifiedVectorFormat probe_format;
 
-	l_child.ToUnifiedFormat(l_size, build_format);
-	r_child.ToUnifiedFormat(r_size, probe_format);
+	l_child.ToUnifiedFormat(build_format);
+	r_child.ToUnifiedFormat(probe_format);
 
 	// Create the sort keys for the list elements
 	Vector l_sortkey_vec(LogicalType::BLOB, l_size);
@@ -175,8 +126,8 @@ static void ListHasAllFunction(DataChunk &args, ExpressionState &state, Vector &
 
 	const OrderModifiers order_modifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST);
 
-	CreateSortKeyHelpers::CreateSortKey(l_child, l_size, order_modifiers, l_sortkey_vec);
-	CreateSortKeyHelpers::CreateSortKey(r_child, r_size, order_modifiers, r_sortkey_vec);
+	CreateSortKeyHelpers::CreateSortKey(l_child, order_modifiers, l_sortkey_vec);
+	CreateSortKeyHelpers::CreateSortKey(r_child, order_modifiers, r_sortkey_vec);
 
 	const auto build_data = FlatVector::GetData<string_t>(l_sortkey_vec);
 	const auto probe_data = FlatVector::GetData<string_t>(r_sortkey_vec);
@@ -184,7 +135,7 @@ static void ListHasAllFunction(DataChunk &args, ExpressionState &state, Vector &
 	string_set_t set;
 
 	BinaryExecutor::Execute<list_entry_t, list_entry_t, bool>(
-	    l_vec, r_vec, result, args.size(), [&](const list_entry_t &build_list, const list_entry_t &probe_list) {
+	    l_vec, r_vec, result, [&](const list_entry_t &build_list, const list_entry_t &probe_list) {
 		    // Short circuit if the probe list is empty
 		    if (probe_list.length == 0) {
 			    return true;
@@ -213,14 +164,14 @@ static void ListHasAllFunction(DataChunk &args, ExpressionState &state, Vector &
 }
 
 ScalarFunction ListHasAnyFun::GetFunction() {
-	ScalarFunction fun({LogicalType::LIST(LogicalType::ANY), LogicalType::LIST(LogicalType::ANY)}, LogicalType::BOOLEAN,
-	                   ListHasAnyFunction, ListHasAnyOrAllBind);
+	ScalarFunction fun({LogicalType::LIST(LogicalType::TEMPLATE("T")), LogicalType::LIST(LogicalType::TEMPLATE("T"))},
+	                   LogicalType::BOOLEAN, ListHasAnyFunction);
 	return fun;
 }
 
 ScalarFunction ListHasAllFun::GetFunction() {
-	ScalarFunction fun({LogicalType::LIST(LogicalType::ANY), LogicalType::LIST(LogicalType::ANY)}, LogicalType::BOOLEAN,
-	                   ListHasAllFunction, ListHasAnyOrAllBind);
+	ScalarFunction fun({LogicalType::LIST(LogicalType::TEMPLATE("T")), LogicalType::LIST(LogicalType::TEMPLATE("T"))},
+	                   LogicalType::BOOLEAN, ListHasAllFunction);
 	return fun;
 }
 

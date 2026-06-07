@@ -9,11 +9,12 @@ namespace duckdb {
 using Filter = FilterPushdown::Filter;
 
 unique_ptr<LogicalOperator> FilterPushdown::PushdownInnerJoin(unique_ptr<LogicalOperator> op,
-                                                              unordered_set<idx_t> &left_bindings,
-                                                              unordered_set<idx_t> &right_bindings) {
+                                                              unordered_set<TableIndex> &left_bindings,
+                                                              unordered_set<TableIndex> &right_bindings) {
 	auto &join = op->Cast<LogicalJoin>();
 	D_ASSERT(join.join_type == JoinType::INNER);
 	if (op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+		op = PushFiltersIntoDelimJoin(std::move(op));
 		return FinishPushdown(std::move(op));
 	}
 	// inner join: gather all the conditions of the inner join and add to the filter list

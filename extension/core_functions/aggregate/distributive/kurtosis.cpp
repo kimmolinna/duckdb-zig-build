@@ -6,6 +6,8 @@
 
 namespace duckdb {
 
+namespace {
+
 struct KurtosisState {
 	idx_t n;
 	double sum;
@@ -98,16 +100,34 @@ struct KurtosisOperation {
 	}
 };
 
+LogicalType GetKurtosisStateType(const BoundAggregateFunction &function) {
+	child_list_t<LogicalType> children;
+	children.emplace_back("n", LogicalType::UBIGINT);
+	children.emplace_back("sum", LogicalType::DOUBLE);
+	children.emplace_back("sum_sqr", LogicalType::DOUBLE);
+	children.emplace_back("sum_cub", LogicalType::DOUBLE);
+	children.emplace_back("sum_four", LogicalType::DOUBLE);
+	return LogicalType::STRUCT(std::move(children));
+}
+
+} // namespace
+
 AggregateFunction KurtosisFun::GetFunction() {
-	return AggregateFunction::UnaryAggregate<KurtosisState, double, double,
-	                                         KurtosisOperation<KurtosisFlagBiasCorrection>>(LogicalType::DOUBLE,
-	                                                                                        LogicalType::DOUBLE);
+	auto result =
+	    AggregateFunction::UnaryAggregate<KurtosisState, double, double, KurtosisOperation<KurtosisFlagBiasCorrection>>(
+	        LogicalType::DOUBLE, LogicalType::DOUBLE);
+	result.SetFallible();
+	result.SetStructStateExport(GetKurtosisStateType);
+	return result;
 }
 
 AggregateFunction KurtosisPopFun::GetFunction() {
-	return AggregateFunction::UnaryAggregate<KurtosisState, double, double,
-	                                         KurtosisOperation<KurtosisFlagNoBiasCorrection>>(LogicalType::DOUBLE,
-	                                                                                          LogicalType::DOUBLE);
+	auto result = AggregateFunction::UnaryAggregate<KurtosisState, double, double,
+	                                                KurtosisOperation<KurtosisFlagNoBiasCorrection>>(
+	    LogicalType::DOUBLE, LogicalType::DOUBLE);
+	result.SetFallible();
+	result.SetStructStateExport(GetKurtosisStateType);
+	return result;
 }
 
 } // namespace duckdb

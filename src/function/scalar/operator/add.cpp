@@ -112,9 +112,21 @@ timestamp_t AddOperator::Operation(interval_t left, timestamp_t right) {
 	return AddOperator::Operation<timestamp_t, interval_t, timestamp_t>(right, left);
 }
 
+template <>
+timestamp_t AddOperator::Operation(timestamp_t left, double right) {
+	timestamp_t result;
+	if (!TryAddOperator::Operation(left.value, int64_t(right), result.value)) {
+		throw OutOfRangeException("Overflow in timestamp addition");
+	}
+	return result;
+}
+
 //===--------------------------------------------------------------------===//
 // + [add] with overflow check
 //===--------------------------------------------------------------------===//
+
+namespace {
+
 struct OverflowCheckedAddition {
 	template <class SRCTYPE, class UTYPE>
 	static inline bool Operation(SRCTYPE left, SRCTYPE right, SRCTYPE &result) {
@@ -126,6 +138,8 @@ struct OverflowCheckedAddition {
 		return true;
 	}
 };
+
+} // namespace
 
 template <>
 bool TryAddOperator::Operation(uint8_t left, uint8_t right, uint8_t &result) {
@@ -218,7 +232,7 @@ bool TryAddOperator::Operation(hugeint_t left, hugeint_t right, hugeint_t &resul
 // add decimal with overflow check
 //===--------------------------------------------------------------------===//
 template <class T, T min, T max>
-bool TryDecimalAddTemplated(T left, T right, T &result) {
+static bool TryDecimalAddTemplated(T left, T right, T &result) {
 	if (right < 0) {
 		if (min - right > left) {
 			return false;

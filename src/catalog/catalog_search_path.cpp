@@ -7,6 +7,9 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/extension_callback_manager.hpp"
+
+#include "duckdb/common/exception/parser_exception.hpp"
 
 namespace duckdb {
 
@@ -24,8 +27,8 @@ string CatalogSearchEntry::ToString() const {
 
 string CatalogSearchEntry::WriteOptionallyQuoted(const string &input) {
 	for (idx_t i = 0; i < input.size(); i++) {
-		if (input[i] == '.' || input[i] == ',') {
-			return "\"" + input + "\"";
+		if (input[i] == '.' || input[i] == ',' || input[i] == '"') {
+			return "\"" + StringUtil::Replace(input, "\"", "\"\"") + "\"";
 		}
 	}
 	return input;
@@ -137,6 +140,10 @@ void CatalogSearchPath::Reset() {
 	SetPathsInternal(empty);
 }
 
+void CatalogSearchPath::RefreshSetPaths() {
+	SetPathsInternal(set_paths);
+}
+
 string CatalogSearchPath::GetSetName(CatalogSetPathType set_type) {
 	switch (set_type) {
 	case CatalogSetPathType::SET_SCHEMA:
@@ -149,10 +156,16 @@ string CatalogSearchPath::GetSetName(CatalogSetPathType set_type) {
 }
 
 void CatalogSearchPath::Set(vector<CatalogSearchEntry> new_paths, CatalogSetPathType set_type) {
-	if (set_type != CatalogSetPathType::SET_SCHEMAS && new_paths.size() != 1) {
+	if (set_type == CatalogSetPathType::SET_SCHEMA && new_paths.size() != 1) {
 		throw CatalogException("%s can set only 1 schema. This has %d", GetSetName(set_type), new_paths.size());
 	}
 	for (auto &path : new_paths) {
+		if (set_type == CatalogSetPathType::SET_DIRECTLY) {
+			if (path.catalog.empty() || path.schema.empty()) {
+				throw InternalException("SET_WITHOUT_VERIFICATION requires a fully qualified set path");
+			}
+			continue;
+		}
 		auto schema_entry = Catalog::GetSchema(context, path.catalog, path.schema, OnEntryNotFound::RETURN_NULL);
 		if (schema_entry) {
 			// we are setting a schema - update the catalog and schema
@@ -189,8 +202,15 @@ void CatalogSearchPath::Set(CatalogSearchEntry new_value, CatalogSetPathType set
 	Set(std::move(new_paths), set_type);
 }
 
-const vector<CatalogSearchEntry> &CatalogSearchPath::Get() const {
-	return paths;
+vector<CatalogSearchEntry> CatalogSearchPath::Get() const {
+	vector<CatalogSearchEntry> res;
+	for (auto &path : paths) {
+		if (path.schema.empty()) {
+			continue;
+		}
+		res.emplace_back(path);
+	}
+	return res;
 }
 
 string CatalogSearchPath::GetDefaultSchema(const string &catalog) const {
@@ -242,7 +262,7 @@ vector<string> CatalogSearchPath::GetCatalogsForSchema(const string &schema) con
 		catalogs.push_back(SYSTEM_CATALOG);
 	} else {
 		for (auto &path : paths) {
-			if (StringUtil::CIEquals(path.schema, schema)) {
+			if (StringUtil::CIEquals(path.schema, schema) || path.schema.empty()) {
 				catalogs.push_back(path.catalog);
 			}
 		}
@@ -253,7 +273,7 @@ vector<string> CatalogSearchPath::GetCatalogsForSchema(const string &schema) con
 vector<string> CatalogSearchPath::GetSchemasForCatalog(const string &catalog) const {
 	vector<string> schemas;
 	for (auto &path : paths) {
-		if (StringUtil::CIEquals(path.catalog, catalog)) {
+		if (!path.schema.empty() && StringUtil::CIEquals(path.catalog, catalog)) {
 			schemas.push_back(path.schema);
 		}
 	}
@@ -261,8 +281,8 @@ vector<string> CatalogSearchPath::GetSchemasForCatalog(const string &catalog) co
 }
 
 const CatalogSearchEntry &CatalogSearchPath::GetDefault() const {
-	const auto &paths = Get();
 	D_ASSERT(paths.size() >= 2);
+	D_ASSERT(!paths[1].schema.empty());
 	return paths[1];
 }
 
@@ -270,7 +290,7 @@ void CatalogSearchPath::SetPathsInternal(vector<CatalogSearchEntry> new_paths) {
 	this->set_paths = std::move(new_paths);
 
 	paths.clear();
-	paths.reserve(set_paths.size() + 3);
+	paths.reserve(set_paths.size() + 4);
 	paths.emplace_back(TEMP_CATALOG, DEFAULT_SCHEMA);
 	for (auto &path : set_paths) {
 		paths.push_back(path);
@@ -278,6 +298,10 @@ void CatalogSearchPath::SetPathsInternal(vector<CatalogSearchEntry> new_paths) {
 	paths.emplace_back(INVALID_CATALOG, DEFAULT_SCHEMA);
 	paths.emplace_back(SYSTEM_CATALOG, DEFAULT_SCHEMA);
 	paths.emplace_back(SYSTEM_CATALOG, "pg_catalog");
+	// set extension schemas on the search path, if any
+	for (auto &schema : ExtensionCallbackManager::Get(context).GetExtensionSchemas()) {
+		paths.emplace_back(SYSTEM_CATALOG, schema);
+	}
 }
 
 bool CatalogSearchPath::SchemaInSearchPath(ClientContext &context, const string &catalog_name,

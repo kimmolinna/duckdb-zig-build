@@ -62,6 +62,28 @@ struct LessThanEquals {
 	}
 };
 
+struct Comparator {
+	static constexpr int8_t LEFT_IS_GREATER = 1;
+	static constexpr int8_t RIGHT_IS_GREATER = -1;
+	static constexpr int8_t VALUES_ARE_EQUAL = 0;
+
+	template <class T>
+	static inline int8_t Operation(const T &left, const T &right) {
+		if (GreaterThan::Operation(left, right)) {
+			return LEFT_IS_GREATER;
+		}
+		if (GreaterThan::Operation(right, left)) {
+			return RIGHT_IS_GREATER;
+		}
+		return VALUES_ARE_EQUAL;
+	}
+};
+
+template <>
+DUCKDB_API int8_t Comparator::Operation(const float &left, const float &right);
+template <>
+DUCKDB_API int8_t Comparator::Operation(const double &left, const double &right);
+
 template <>
 DUCKDB_API bool Equals::Operation(const float &left, const float &right);
 template <>
@@ -142,6 +164,34 @@ struct DistinctLessThanEquals {
 	}
 };
 
+struct DistinctComparator {
+	template <class T>
+	static inline int8_t Operation(const T &left, const T &right, bool left_null, bool right_null) {
+		if (DUCKDB_UNLIKELY(left_null || right_null)) {
+			if (left_null && right_null) {
+				return 0;
+			}
+			// NULLS LAST: NULL is greater than any non-NULL value
+			return left_null ? 1 : -1;
+		}
+		return Comparator::Operation<T>(left, right);
+	}
+};
+
+struct DistinctComparatorNullsFirst {
+	template <class T>
+	static inline int8_t Operation(const T &left, const T &right, bool left_null, bool right_null) {
+		if (DUCKDB_UNLIKELY(left_null || right_null)) {
+			if (left_null && right_null) {
+				return 0;
+			}
+			// NULLS FIRST: NULL is smaller than any non-NULL value
+			return left_null ? -1 : 1;
+		}
+		return Comparator::Operation<T>(left, right);
+	}
+};
+
 //===--------------------------------------------------------------------===//
 // Comparison Operator Wrappers (so (Not)DistinctFrom have the same API)
 //===--------------------------------------------------------------------===//
@@ -210,15 +260,4 @@ inline bool GreaterThan::Operation(const interval_t &left, const interval_t &rig
 	return Interval::GreaterThan(left, right);
 }
 
-//===--------------------------------------------------------------------===//
-// Specialized Hugeint Comparison Operators
-//===--------------------------------------------------------------------===//
-template <>
-inline bool Equals::Operation(const hugeint_t &left, const hugeint_t &right) {
-	return Hugeint::Equals(left, right);
-}
-template <>
-inline bool GreaterThan::Operation(const hugeint_t &left, const hugeint_t &right) {
-	return Hugeint::GreaterThan(left, right);
-}
 } // namespace duckdb

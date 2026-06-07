@@ -6,10 +6,7 @@ statement ok
 SET default_null_order='nulls_first';
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
-PRAGMA verify_external
+SET debug_force_external=true;
 
 # Get around 1% approximately equal for R
 statement ok
@@ -18,6 +15,7 @@ create table quantile as select range r, random() from range(0,1000000,100) unio
 statement error
 SELECT quantile_cont(r, NULL) FROM quantile
 ----
+Binder Error: QUANTILE argument must not be NULL
 
 query R
 SELECT quantile_cont(r, 0.5) FROM quantile
@@ -70,7 +68,7 @@ SELECT quantile_cont(r, 0.25), quantile_cont(r, 0.5), quantile_cont(r, 0.75) fro
 foreach type decimal(4,1) decimal(8,1) decimal(12,1) decimal(18,1) decimal(24,1)
 
 query III
-SELECT quantile_cont(d::${type}, 0.25), quantile_cont(d::${type}, 0.5), quantile_cont(d::${type}, 0.75)
+SELECT quantile_cont(d::{type}, 0.25), quantile_cont(d::{type}, 0.5), quantile_cont(d::{type}, 0.75)
 FROM range(0,100) tbl(d)
 ----
 24.7	49.5	74.2
@@ -112,6 +110,7 @@ SELECT quantile_cont('00:00:00'::TIME + interval (r/100) second, 0.5) FROM quant
 statement error
 SELECT quantile_cont(interval (r/100) second, 0.5) FROM quantile
 ----
+<REGEX>:.*Binder Error: No function matches.*'quantile_cont.*
 
 # WITH TIME ZONE
 query I
@@ -150,31 +149,37 @@ NULL
 statement error
 SELECT quantile_cont(r, -1.1) FROM quantile
 ----
+Binder Error: QUANTILE can only take parameters in the range [-1, 1]
 
 statement error
 SELECT quantile_cont(r, 1.1) FROM quantile
 ----
+Binder Error: QUANTILE can only take parameters in the range [-1, 1]
 
 statement error
 SELECT quantile_cont(r, "string") FROM quantile
 ----
+Binder Error: Referenced column "string" not found in FROM clause
 
 statement error
 SELECT quantile_cont(r, NULL) FROM quantile
 ----
+Binder Error: QUANTILE argument must not be NULL
 
 statement error
 SELECT quantile_cont(r::string, 0.5) FROM quantile
 ----
+<REGEX>:.*Binder Error: No function matches.*'quantile_cont.*
 
 statement error
 SELECT quantile_cont(r) FROM quantile
 ----
+<REGEX>:.*Binder Error: No function matches.*'quantile_cont.*
 
 statement error
 SELECT quantile_cont(r, 0.1, 50) FROM quantile
 ----
-
+<REGEX>:.*Binder Error: No function matches.*'quantile_cont.*
 
 statement ok
 pragma threads=4
@@ -321,3 +326,4 @@ SELECT quantile_cont(t, 0.5) FROM bigints;
 statement error
 SELECT quantile_cont(r, random()) FROM quantile
 ----
+Binder Error: QUANTILE can only take constant parameters

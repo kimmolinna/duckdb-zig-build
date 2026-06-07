@@ -3,9 +3,6 @@
 # group: [list]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE listdata (
     c0 char(1),
     c1 char(1),
@@ -300,3 +297,4 @@ NULL
 statement error
 SELECT (1)[1:2];
 ----
+<REGEX>:.*Binder Error.*ARRAY_SLICE can only operate on LISTs and VARCHARs.*

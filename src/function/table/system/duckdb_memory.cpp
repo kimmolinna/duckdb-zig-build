@@ -31,6 +31,13 @@ unique_ptr<GlobalTableFunctionState> DuckDBMemoryInit(ClientContext &context, Ta
 	return std::move(result);
 }
 
+int64_t ClampReportedMemory(idx_t memory_usage) {
+	if (memory_usage > static_cast<idx_t>(NumericLimits<int64_t>::Maximum())) {
+		return 0;
+	}
+	return UnsafeNumericCast<int64_t>(memory_usage);
+}
+
 void DuckDBMemoryFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.global_state->Cast<DuckDBMemoryData>();
 	if (data.offset >= data.entries.size()) {
@@ -40,19 +47,21 @@ void DuckDBMemoryFunction(ClientContext &context, TableFunctionInput &data_p, Da
 	// start returning values
 	// either fill up the chunk or return all the remaining columns
 	idx_t count = 0;
+
+	// tag, VARCHAR
+	auto &tag = output.data[0];
+	// memory_usage_bytes, BIGINT
+	auto &memory_usage_bytes = output.data[1];
+	// temporary_storage_bytes, BIGINT
+	auto &temporary_storage_bytes = output.data[2];
+
 	while (data.offset < data.entries.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &entry = data.entries[data.offset++];
-		// return values:
-		idx_t col = 0;
-		// tag, VARCHAR
-		output.SetValue(col++, count, EnumUtil::ToString(entry.tag));
-		// memory_usage_bytes, BIGINT
-		output.SetValue(col++, count, Value::BIGINT(NumericCast<int64_t>(entry.size)));
-		// temporary_storage_bytes, BIGINT
-		output.SetValue(col++, count, Value::BIGINT(NumericCast<int64_t>(entry.evicted_data)));
+		tag.Append(Value(EnumUtil::ToString(entry.tag)));
+		memory_usage_bytes.Append(Value::BIGINT(ClampReportedMemory(entry.size)));
+		temporary_storage_bytes.Append(Value::BIGINT(ClampReportedMemory(entry.evicted_data)));
 		count++;
 	}
-	output.SetCardinality(count);
 }
 
 void DuckDBMemoryFun::RegisterFunction(BuiltinFunctions &set) {

@@ -3,7 +3,7 @@
 # group: [numeric]
 
 statement ok
-PRAGMA enable_verification
+SET ieee_floating_point_ops = false;
 
 query I
 SELECT gamma(NULL)
@@ -13,6 +13,7 @@ NULL
 statement error
 SELECT gamma(0)
 ----
+<REGEX>:.*Out of Range Error: cannot take gamma.*
 
 query I
 SELECT gamma(-1)
@@ -53,6 +54,7 @@ SELECT gamma(2::hugeint)
 statement error
 SELECT gamma('asdf')
 ----
+<REGEX>:.*Conversion Error: Could not convert string.*
 
 query I
 SELECT lgamma(NULL)
@@ -62,6 +64,7 @@ NULL
 statement error
 SELECT lgamma(0)
 ----
+<REGEX>:.*Out of Range Error: cannot take.*
 
 query I
 SELECT lgamma(-1)
@@ -107,3 +110,19 @@ SELECT lgamma(2::hugeint)
 statement error
 SELECT lgamma('asdf')
 ----
+<REGEX>:.*Conversion Error: Could not convert string.*
+
+statement ok
+RESET ieee_floating_point_ops;
+
+# IEEE behavior returns NAN/INF instead of errors when enabled
+statement ok
+SET ieee_floating_point_ops = true;
+
+query IIII
+SELECT gamma(0::DOUBLE), gamma(-1::DOUBLE), lgamma(0::DOUBLE), lgamma(-1::DOUBLE);
+----
+inf	nan	inf	inf
+
+statement ok
+RESET ieee_floating_point_ops;

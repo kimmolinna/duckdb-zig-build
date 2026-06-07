@@ -2,15 +2,14 @@
 
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/planner/binder.hpp"
-#include "duckdb/planner/expression_binder/aggregate_binder.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/query_node/bound_select_node.hpp"
 #include "duckdb/parser/expression/window_expression.hpp"
 
 namespace duckdb {
 
-QualifyBinder::QualifyBinder(Binder &binder, ClientContext &context, BoundSelectNode &node, BoundGroupInformation &info)
-    : BaseSelectBinder(binder, context, node, info), column_alias_binder(node.bind_state) {
+QualifyBinder::QualifyBinder(Binder &binder, ClientContext &context, BoundSelectNode &node)
+    : BaseSelectBinder(binder, context, node), column_alias_binder(node.bind_state) {
 	target_type = LogicalType(LogicalTypeId::BOOLEAN);
 }
 

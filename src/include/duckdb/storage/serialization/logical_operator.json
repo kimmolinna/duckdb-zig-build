@@ -19,6 +19,11 @@
         "name": "children",
         "type": "vector<LogicalOperator*>"
       }
+    ],
+    "finalize_deserialization": [
+      "if (type == LogicalOperatorType::LOGICAL_UPDATE) {",
+      "\tLogicalUpdate::RewriteInPlaceUpdates(*result);",
+      "}"
     ]
   },
   {
@@ -29,7 +34,7 @@
       {
         "id": 200,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -37,7 +42,10 @@
         "type": "vector<Expression*>"
       }
     ],
-    "constructor": ["table_index", "expressions"]
+    "constructor": [
+      "table_index",
+      "expressions"
+    ]
   },
   {
     "class": "LogicalFilter",
@@ -52,7 +60,7 @@
       {
         "id": 201,
         "name": "projection_map",
-        "type": "vector<idx_t>"
+        "type": "vector<ProjectionIndex>"
       }
     ]
   },
@@ -69,17 +77,17 @@
       {
         "id": 201,
         "name": "group_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 202,
         "name": "aggregate_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 203,
         "name": "groupings_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 204,
@@ -94,10 +102,20 @@
       {
         "id": 206,
         "name": "grouping_functions",
-        "type": "vector<unsafe_vector<idx_t>>"
+        "type": "vector<unsafe_vector<ProjectionIndex>>"
+      },
+      {
+        "id": 207,
+        "name": "distinct_validity",
+        "type": "TupleDataValidityType",
+        "default": "TupleDataValidityType::CAN_HAVE_NULL_VALUES"
       }
     ],
-    "constructor": ["group_index", "aggregate_index", "expressions"]
+    "constructor": [
+      "group_index",
+      "aggregate_index",
+      "expressions"
+    ]
   },
   {
     "class": "LogicalWindow",
@@ -107,7 +125,7 @@
       {
         "id": 200,
         "name": "window_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -115,7 +133,9 @@
         "type": "vector<Expression*>"
       }
     ],
-    "constructor": ["window_index"]
+    "constructor": [
+      "window_index"
+    ]
   },
   {
     "class": "LogicalUnnest",
@@ -125,7 +145,7 @@
       {
         "id": 200,
         "name": "unnest_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -133,7 +153,9 @@
         "type": "vector<Expression*>"
       }
     ],
-    "constructor": ["unnest_index"]
+    "constructor": [
+      "unnest_index"
+    ]
   },
   {
     "class": "LogicalLimit",
@@ -151,7 +173,10 @@
         "type": "BoundLimitNode"
       }
     ],
-    "constructor": ["limit_val", "offset_val"]
+    "constructor": [
+      "limit_val",
+      "offset_val"
+    ]
   },
   {
     "class": "LogicalOrder",
@@ -166,11 +191,13 @@
       {
         "id": 201,
         "name": "projections",
-        "type": "vector<idx_t>",
+        "type": "vector<ProjectionIndex>",
         "property": "projection_map"
       }
     ],
-    "constructor": ["orders"]
+    "constructor": [
+      "orders"
+    ]
   },
   {
     "class": "LogicalTopN",
@@ -193,7 +220,11 @@
         "type": "idx_t"
       }
     ],
-    "constructor": ["orders", "limit", "offset"]
+    "constructor": [
+      "orders",
+      "limit",
+      "offset"
+    ]
   },
   {
     "class": "LogicalDistinct",
@@ -216,7 +247,10 @@
         "type": "BoundOrderModifier*"
       }
     ],
-    "constructor": ["distinct_targets", "distinct_type"]
+    "constructor": [
+      "distinct_targets",
+      "distinct_type"
+    ]
   },
   {
     "class": "LogicalSample",
@@ -238,7 +272,7 @@
       {
         "id": 200,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -251,7 +285,11 @@
         "type": "optionally_owned_ptr<ColumnDataCollection>"
       }
     ],
-    "constructor": ["table_index", "chunk_types", "collection"]
+    "constructor": [
+      "table_index",
+      "chunk_types",
+      "collection"
+    ]
   },
   {
     "class": "LogicalDelimGet",
@@ -261,7 +299,7 @@
       {
         "id": 200,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -269,7 +307,10 @@
         "type": "vector<LogicalType>"
       }
     ],
-    "constructor": ["table_index", "chunk_types"]
+    "constructor": [
+      "table_index",
+      "chunk_types"
+    ]
   },
   {
     "class": "LogicalExpressionGet",
@@ -279,7 +320,7 @@
       {
         "id": 200,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -292,7 +333,11 @@
         "type": "vector<vector<Expression*>>"
       }
     ],
-    "constructor": ["table_index", "expr_types", "expressions"]
+    "constructor": [
+      "table_index",
+      "expr_types",
+      "expressions"
+    ]
   },
   {
     "class": "LogicalDummyScan",
@@ -302,10 +347,12 @@
       {
         "id": 200,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       }
     ],
-    "constructor": ["table_index"]
+    "constructor": [
+      "table_index"
+    ]
   },
   {
     "class": "LogicalEmptyResult",
@@ -332,12 +379,12 @@
       {
         "id": 200,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
         "name": "cte_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 202,
@@ -352,19 +399,30 @@
       {
         "id": 204,
         "name": "materialized_cte",
-        "type": "CTEMaterialize"
-      }, {
+        "type": "CTEMaterialize",
+        "status": "deleted"
+      },
+      {
         "id": 205,
         "name": "is_recurring",
         "type": "bool"
       }
     ],
-    "constructor": ["table_index", "cte_index", "chunk_types", "bound_columns", "materialized_cte"]
+    "constructor": [
+      "table_index",
+      "cte_index",
+      "chunk_types",
+      "bound_columns"
+    ]
   },
   {
     "class": "LogicalComparisonJoin",
     "base": "LogicalOperator",
-    "enum": ["LOGICAL_ASOF_JOIN", "LOGICAL_COMPARISON_JOIN", "LOGICAL_DELIM_JOIN"],
+    "enum": [
+      "LOGICAL_ASOF_JOIN",
+      "LOGICAL_COMPARISON_JOIN",
+      "LOGICAL_DELIM_JOIN"
+    ],
     "members": [
       {
         "id": 200,
@@ -374,17 +432,17 @@
       {
         "id": 201,
         "name": "mark_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 202,
         "name": "left_projection_map",
-        "type": "vector<idx_t>"
+        "type": "vector<ProjectionIndex>"
       },
       {
         "id": 203,
         "name": "right_projection_map",
-        "type": "vector<idx_t>"
+        "type": "vector<ProjectionIndex>"
       },
       {
         "id": 204,
@@ -406,9 +464,18 @@
         "name": "delim_flipped",
         "type": "bool",
         "default": "false"
+      },
+      {
+        "id": 208,
+        "name": "predicate",
+        "type": "Expression*",
+        "status": "deleted"
       }
     ],
-    "constructor": ["join_type", "type"]
+    "constructor": [
+      "join_type",
+      "type"
+    ]
   },
   {
     "class": "LogicalAnyJoin",
@@ -423,17 +490,17 @@
       {
         "id": 201,
         "name": "mark_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 202,
         "name": "left_projection_map",
-        "type": "vector<idx_t>"
+        "type": "vector<ProjectionIndex>"
       },
       {
         "id": 203,
         "name": "right_projection_map",
-        "type": "vector<idx_t>"
+        "type": "vector<ProjectionIndex>"
       },
       {
         "id": 204,
@@ -441,7 +508,9 @@
         "type": "Expression*"
       }
     ],
-    "constructor": ["join_type"]
+    "constructor": [
+      "join_type"
+    ]
   },
   {
     "class": "LogicalCrossProduct",
@@ -460,12 +529,16 @@
   {
     "class": "LogicalSetOperation",
     "base": "LogicalOperator",
-    "enum": ["LOGICAL_UNION", "LOGICAL_EXCEPT", "LOGICAL_INTERSECT"],
+    "enum": [
+      "LOGICAL_UNION",
+      "LOGICAL_EXCEPT",
+      "LOGICAL_INTERSECT"
+    ],
     "members": [
       {
         "id": 200,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -485,7 +558,13 @@
         "default": "true"
       }
     ],
-    "constructor": ["table_index", "column_count", "type", "setop_all", "allow_out_of_order"]
+    "constructor": [
+      "table_index",
+      "column_count",
+      "type",
+      "setop_all",
+      "allow_out_of_order"
+    ]
   },
   {
     "class": "LogicalRecursiveCTE",
@@ -505,7 +584,7 @@
       {
         "id": 202,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 203,
@@ -521,6 +600,16 @@
         "id": 205,
         "name": "ref_recurring",
         "type": "bool"
+      },
+      {
+        "id": 206,
+        "name": "payload_aggregates",
+        "type": "vector<Expression*>"
+      },
+      {
+        "id": 207,
+        "name": "internal_types",
+        "type": "vector<LogicalType>"
       }
     ]
   },
@@ -532,7 +621,7 @@
       {
         "id": 200,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -543,6 +632,12 @@
         "id": 202,
         "name": "ctename",
         "type": "string"
+      },
+      {
+        "id": 203,
+        "name": "materialize",
+        "type": "CTEMaterialize",
+        "default": "CTEMaterialize::CTE_MATERIALIZE_DEFAULT"
       }
     ]
   },
@@ -579,7 +674,7 @@
       {
         "id": 204,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 205,
@@ -594,66 +689,81 @@
       {
         "id": 207,
         "name": "action_type",
-        "type": "OnConflictAction"
+        "type": "OnConflictAction",
+        "property": "on_conflict_info.action_type"
       },
       {
         "id": 208,
         "name": "expected_set_types",
-        "type": "vector<LogicalType>"
+        "type": "vector<LogicalType>",
+        "property": "on_conflict_info.expected_set_types"
       },
       {
         "id": 209,
         "name": "on_conflict_filter",
-        "type": "unordered_set<idx_t>"
+        "type": "unordered_set<idx_t>",
+        "property": "on_conflict_info.on_conflict_filter"
       },
       {
         "id": 210,
         "name": "on_conflict_condition",
-        "type": "Expression*"
+        "type": "Expression*",
+        "property": "on_conflict_info.on_conflict_condition"
       },
       {
         "id": 211,
         "name": "do_update_condition",
-        "type": "Expression*"
+        "type": "Expression*",
+        "property": "on_conflict_info.do_update_condition"
       },
       {
         "id": 212,
         "name": "set_columns",
-        "type": "vector<PhysicalIndex>"
+        "type": "vector<PhysicalIndex>",
+        "property": "on_conflict_info.set_columns"
       },
       {
         "id": 213,
         "name": "set_types",
-        "type": "vector<LogicalType>"
+        "type": "vector<LogicalType>",
+        "property": "on_conflict_info.set_types"
       },
       {
         "id": 214,
         "name": "excluded_table_index",
-        "type": "idx_t"
+        "type": "TableIndex",
+        "property": "on_conflict_info.excluded_table_index"
       },
       {
         "id": 215,
         "name": "columns_to_fetch",
-        "type": "vector<column_t>"
+        "type": "vector<column_t>",
+        "property": "on_conflict_info.columns_to_fetch"
       },
       {
         "id": 216,
         "name": "source_columns",
-        "type": "vector<column_t>"
+        "type": "vector<column_t>",
+        "property": "on_conflict_info.source_columns"
       },
       {
         "id": 217,
         "name": "expressions",
-        "type": "vector<Expression*>"
+        "type": "vector<Expression*>",
+        "property": "expressions"
       },
       {
         "id": 218,
         "name": "update_is_del_and_insert",
         "type": "bool",
-        "default": "false"
+        "default": "false",
+        "property": "on_conflict_info.update_is_del_and_insert"
       }
     ],
-    "constructor": ["$ClientContext", "table_info"]
+    "constructor": [
+      "$ClientContext",
+      "table_info"
+    ]
   },
   {
     "class": "LogicalDelete",
@@ -669,7 +779,7 @@
       {
         "id": 201,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 202,
@@ -680,9 +790,17 @@
         "id": 203,
         "name": "expressions",
         "type": "vector<Expression*>"
+      },
+      {
+        "id": 204,
+        "name": "return_columns",
+        "type": "vector<idx_t>"
       }
     ],
-    "constructor": ["$ClientContext", "table_info&"]
+    "constructor": [
+      "$ClientContext",
+      "table_info&"
+    ]
   },
   {
     "class": "LogicalUpdate",
@@ -698,7 +816,7 @@
       {
         "id": 201,
         "name": "table_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 202,
@@ -726,7 +844,94 @@
         "type": "bool"
       }
     ],
+    "constructor": [
+      "$ClientContext",
+      "table_info&"
+    ]
+  },
+  {
+    "class": "LogicalMergeInto",
+    "base": "LogicalOperator",
+    "enum": "LOGICAL_MERGE_INTO",
+    "members": [
+      {
+        "id": 200,
+        "name": "table_info",
+        "type": "CreateInfo*",
+        "serialize_property": "table.GetInfo()"
+      },
+      {
+        "id": 201,
+        "name": "table_index",
+        "type": "TableIndex"
+      },
+      {
+        "id": 202,
+        "name": "bound_defaults",
+        "type": "vector<Expression*>"
+      },
+      {
+        "id": 203,
+        "name": "row_id_start",
+        "type": "idx_t"
+      },
+      {
+        "id": 204,
+        "name": "source_marker",
+        "type": "optional_idx"
+      },
+      {
+        "id": 205,
+        "name": "actions",
+        "type": "map<MergeActionCondition, vector<unique_ptr<BoundMergeIntoAction>>>"
+      },
+      {
+        "id": 206,
+        "name": "return_chunk",
+        "type": "bool"
+      },
+      {
+        "id": 207,
+        "name": "delete_return_columns",
+        "type": "vector<idx_t>"
+      }
+    ],
     "constructor": ["$ClientContext", "table_info&"]
+  },
+  {
+    "class": "BoundMergeIntoAction",
+    "members": [
+      {
+        "id": 200,
+        "name": "action_type",
+        "type": "MergeActionType"
+      },
+      {
+        "id": 201,
+        "name": "condition",
+        "type": "Expression*"
+      },
+      {
+        "id": 202,
+        "name": "columns",
+        "type": "vector<PhysicalIndex>"
+      },
+      {
+        "id": 203,
+        "name": "expressions",
+        "type": "vector<Expression*>"
+      },
+      {
+        "id": 204,
+        "name": "column_index_map",
+        "type": "IndexVector<idx_t, PhysicalIndex>"
+      },
+      {
+        "id": 205,
+        "name": "update_is_del_and_insert",
+        "type": "bool"
+      }
+    ]
   },
   {
     "class": "LogicalCreateTable",
@@ -740,12 +945,22 @@
         "serialize_property": "info->base"
       }
     ],
-    "constructor": ["$ClientContext", "info"]
+    "constructor": [
+      "$ClientContext",
+      "info"
+    ]
   },
   {
     "class": "LogicalCreate",
     "base": "LogicalOperator",
-    "enum": ["LOGICAL_CREATE_SEQUENCE", "LOGICAL_CREATE_VIEW", "LOGICAL_CREATE_SCHEMA", "LOGICAL_CREATE_MACRO", "LOGICAL_CREATE_TYPE"],
+    "enum": [
+      "LOGICAL_CREATE_SEQUENCE",
+      "LOGICAL_CREATE_VIEW",
+      "LOGICAL_CREATE_SCHEMA",
+      "LOGICAL_CREATE_MACRO",
+      "LOGICAL_CREATE_TYPE",
+      "LOGICAL_CREATE_TRIGGER"
+    ],
     "members": [
       {
         "id": 200,
@@ -753,7 +968,11 @@
         "type": "CreateInfo*"
       }
     ],
-    "constructor": ["type", "$ClientContext", "info"]
+    "constructor": [
+      "type",
+      "$ClientContext",
+      "info"
+    ]
   },
   {
     "class": "LogicalExplain",
@@ -781,7 +1000,9 @@
         "type": "string"
       }
     ],
-    "constructor": ["explain_type"]
+    "constructor": [
+      "explain_type"
+    ]
   },
   {
     "class": "LogicalSet",
@@ -804,7 +1025,11 @@
         "type": "SetScope"
       }
     ],
-    "constructor": ["name", "value", "scope"]
+    "constructor": [
+      "name",
+      "value",
+      "scope"
+    ]
   },
   {
     "class": "LogicalReset",
@@ -822,12 +1047,24 @@
         "type": "SetScope"
       }
     ],
-    "constructor": ["name", "scope"]
+    "constructor": [
+      "name",
+      "scope"
+    ]
   },
   {
     "class": "LogicalSimple",
     "base": "LogicalOperator",
-    "enum": ["LOGICAL_ALTER", "LOGICAL_LOAD", "LOGICAL_ATTACH", "LOGICAL_TRANSACTION", "LOGICAL_DROP", "LOGICAL_DETACH"],
+    "enum": [
+      "LOGICAL_ALTER",
+      "LOGICAL_LOAD",
+      "LOGICAL_ATTACH",
+      "LOGICAL_TRANSACTION",
+      "LOGICAL_DROP",
+      "LOGICAL_DETACH",
+      "LOGICAL_CONNECT",
+      "LOGICAL_DISCONNECT"
+    ],
     "members": [
       {
         "id": 200,
@@ -835,7 +1072,10 @@
         "type": "ParseInfo*"
       }
     ],
-    "constructor": ["type", "info"]
+    "constructor": [
+      "type",
+      "info"
+    ]
   },
   {
     "class": "LogicalPivot",
@@ -845,7 +1085,7 @@
       {
         "id": 200,
         "name": "pivot_index",
-        "type": "idx_t"
+        "type": "TableIndex"
       },
       {
         "id": 201,
@@ -872,7 +1112,9 @@
         "base": "ParseInfo"
       }
     ],
-    "constructor": ["info"]
+    "constructor": [
+      "info"
+    ]
   },
   {
     "class": "LogicalCopyToFile",
@@ -903,7 +1145,12 @@
         "base": "ParseInfo"
       }
     ],
-    "constructor": ["$ClientContext", "info", "unbound_expressions", "alter_table_info"]
+    "constructor": [
+      "$ClientContext",
+      "info",
+      "unbound_expressions",
+      "alter_table_info"
+    ]
   },
   {
     "class": "LogicalExtensionOperator",
@@ -935,7 +1182,11 @@
         "base": "ParseInfo"
       }
     ],
-    "constructor": ["$ClientContext", "copy_info", "exported_tables"]
+    "constructor": [
+      "$ClientContext",
+      "copy_info",
+      "exported_tables"
+    ]
   },
   {
     "class": "FilenamePattern",
@@ -944,17 +1195,48 @@
       {
         "id": 200,
         "name": "base",
-        "type": "string"
+        "type": "string",
+        "serialize_property": "SerializeBase()"
       },
       {
         "id": 201,
         "name": "pos",
-        "type": "idx_t"
+        "type": "idx_t",
+        "serialize_property": "SerializePos()"
       },
       {
         "id": 202,
         "name": "uuid",
-        "type": "bool"
+        "type": "bool",
+        "serialize_property": "HasUUID()"
+      },
+      {
+        "id": 203,
+        "name": "segments",
+        "type": "vector<FileNameSegment>",
+        "serialize_property": "SerializeSegments()"
+      }
+    ],
+    "constructor": [
+      "base",
+      "pos",
+      "uuid",
+      "segments"
+    ]
+  },
+  {
+    "class": "FileNameSegment",
+    "pointer_type": "none",
+    "members": [
+      {
+        "id": 200,
+        "name": "type",
+        "type": "FileNameSegmentType"
+      },
+      {
+        "id": 201,
+        "name": "data",
+        "type": "string"
       }
     ]
   }

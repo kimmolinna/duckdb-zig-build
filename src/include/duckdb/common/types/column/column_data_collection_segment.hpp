@@ -36,11 +36,13 @@ struct VectorDataIndex {
 };
 
 struct SwizzleMetaData {
-	SwizzleMetaData(VectorDataIndex child_index_p, uint16_t offset_p, uint16_t count_p)
-	    : child_index(child_index_p), offset(offset_p), count(count_p) {
+	SwizzleMetaData(VectorDataIndex child_index_p, data_ptr_t ptr_p, uint16_t offset_p, uint16_t count_p)
+	    : child_index(child_index_p), ptr(ptr_p), offset(offset_p), count(count_p) {
 	}
 	//! Index of block storing heap
 	VectorDataIndex child_index;
+	//! Last-known pointer
+	data_ptr_t ptr;
 	//! Offset into the string_t vector
 	uint16_t offset;
 	//! Number of strings starting at 'offset' that have strings stored in the block with index 'child_index'
@@ -76,13 +78,20 @@ struct ChunkMetaData {
 	unordered_set<uint32_t> block_ids;
 	//! The number of entries in the chunk
 	uint16_t count;
+	//! Total allocation size for this chunk
+	optional_idx allocation_size;
 };
 
 class ColumnDataCollectionSegment {
 public:
 	ColumnDataCollectionSegment(shared_ptr<ColumnDataAllocator> allocator, vector<LogicalType> types_p);
 
+public:
+	//! The allocator and allocation statistics
 	shared_ptr<ColumnDataAllocator> allocator;
+	idx_t total_allocated;
+	idx_t last_chunk_total_allocated;
+
 	//! The types of the chunks
 	vector<LogicalType> types;
 	//! The number of entries in the internal column data
@@ -97,6 +106,8 @@ public:
 	shared_ptr<StringHeap> heap;
 
 public:
+	//! Reset this segment for reuse, clearing all metadata while keeping allocated buffers
+	void Reset();
 	void AllocateNewChunk();
 	//! Allocate space for a vector of a specific type in the segment
 	VectorDataIndex AllocateVector(const LogicalType &type, ChunkMetaData &chunk_data,
@@ -130,6 +141,8 @@ public:
 	idx_t SizeInBytes() const;
 	//! Get the currently allocated size in bytes (cached)
 	idx_t AllocationSize() const;
+	//! Get the allocation size of the chunk
+	idx_t GetChunkAllocationSize(idx_t chunk_index) const;
 
 	void FetchChunk(idx_t chunk_idx, DataChunk &result);
 	void FetchChunk(idx_t chunk_idx, DataChunk &result, const vector<column_t> &column_ids);

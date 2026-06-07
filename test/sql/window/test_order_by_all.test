@@ -2,9 +2,6 @@
 # description: Window Order By All
 # group: [window]
 
-statement ok
-PRAGMA enable_verification
-
 statement error
 SELECT i, j, ROW_NUMBER() OVER (ORDER BY ALL) AS rn
 FROM (
@@ -14,3 +11,22 @@ FROM (
 ) t;
 ----
 Cannot ORDER BY ALL in a window expression
+
+# We CAN order by column patterns
+query II
+SELECT
+    rank() OVER (ORDER BY COLUMNS('^(.*)_score$') DESC) AS '\1_rank'
+FROM (
+    SELECT 
+    	range AS math_score, 
+    	100-range as reading_score
+    from range(65, 100, 5)
+);
+----
+7	1
+6	2
+5	3
+4	4
+3	5
+2	6
+1	7

@@ -2,9 +2,6 @@
 # description: Test COALESCE error short-circuiting
 # group: [projection]
 
-statement ok
-PRAGMA enable_verification
-
 # constant coalesce short-circuiting
 query I
 SELECT COALESCE(1, 'hello'::INT)
@@ -14,6 +11,7 @@ SELECT COALESCE(1, 'hello'::INT)
 statement error
 SELECT COALESCE(NULL, 'hello'::INT)
 ----
+<REGEX>:.*Conversion Error.*Could not convert string.*
 
 # non-constant
 statement ok
@@ -31,4 +29,4 @@ SELECT COALESCE(a, b::INT) FROM vals
 statement error
 SELECT COALESCE(NULL, b::INT) FROM vals
 ----
-
+<REGEX>:.*Conversion Error.*Could not convert string.*

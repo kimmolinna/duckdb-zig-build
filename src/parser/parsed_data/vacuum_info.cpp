@@ -1,4 +1,5 @@
 #include "duckdb/parser/parsed_data/vacuum_info.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 
 namespace duckdb {
 
@@ -26,7 +27,7 @@ string VacuumInfo::ToString() const {
 		if (!columns.empty()) {
 			vector<string> names;
 			for (auto &column : columns) {
-				names.push_back(KeywordHelper::WriteOptionallyQuoted(column));
+				names.push_back(SQLIdentifier::ToString(column));
 			}
 			result += "(" + StringUtil::Join(names, ", ") + ")";
 		}

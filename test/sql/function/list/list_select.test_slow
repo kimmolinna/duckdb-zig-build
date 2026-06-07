@@ -3,9 +3,6 @@
 # group: [list]
 
 statement ok
-PRAGMA enable_verification
-
-statement ok
 CREATE TABLE integers (i int[])
 
 statement ok
@@ -144,12 +141,12 @@ SELECT list_select([NULL::VARCHAR], [1])
 foreach type tinyint smallint integer bigint hugeint utinyint usmallint uinteger ubigint
 
 query I
-SELECT list_select([1::${type}, NULL, 2::${type}], [2,1,3])
+SELECT list_select([1::{type}, NULL, 2::{type}], [2,1,3])
 ----
 [NULL, 1, 2]
 
 query I
-SELECT list_select([NULL::${type}], [1])
+SELECT list_select([NULL::{type}], [1])
 ----
 [NULL]
 
@@ -160,10 +157,10 @@ endloop
 foreach type float double decimal(4,1) decimal(9,4) decimal(18,6) decimal(38,10)
 
 statement ok
-SELECT list_select([1::${type}], [2,1])
+SELECT list_select([1::{type}], [2,1])
 
 query I
-SELECT list_select([NULL::${type}], [1])
+SELECT list_select([NULL::{type}], [1])
 ----
 [NULL]
 
@@ -181,43 +178,43 @@ SELECT list_select(['2021-08-20'::DATE], [1])
 query I
 SELECT list_select(['14:59:37'::TIME], [1])
 ----
-[14:59:37]
+['14:59:37']
 
 # timestamp
 query I
 SELECT list_select(['2021-08-20'::TIMESTAMP], [1])
 ----
-[2021-08-20 00:00:00]
+['2021-08-20 00:00:00']
 
 # timestamp s
 query I
 SELECT list_select(['2021-08-20'::TIMESTAMP_S], [1])
 ----
-[2021-08-20 00:00:00]
+['2021-08-20 00:00:00']
 
 # timestamp ms
 query I
 SELECT list_select(['2021-08-20 00:00:00.123'::TIMESTAMP_MS], [1])
 ----
-[2021-08-20 00:00:00.123]
+['2021-08-20 00:00:00.123']
 
 # timestamp ns
 query I
 SELECT list_select(['2021-08-20 00:00:00.123456'::TIMESTAMP_NS], [1])
 ----
-[2021-08-20 00:00:00.123456]
+['2021-08-20 00:00:00.123456']
 
 # time with time zone
 query I
 SELECT list_select(['14:59:37'::TIMETZ], [1])
 ----
-[14:59:37+00]
+['14:59:37+00']
 
 # timestamp with time zone
 query I
 SELECT list_select(['2021-08-20'::TIMESTAMPTZ], [1])
 ----
-[2021-08-20 00:00:00+00]
+['2021-08-20 00:00:00+00']
 
 # interval
 query I
@@ -228,7 +225,7 @@ SELECT list_select([INTERVAL 1 YEAR], [1])
 foreach type date time timestamp timestamp_s timestamp_ms timestamp_ns timetz timestamptz interval
 
 query I
-SELECT list_select([NULL::${type}], [1])
+SELECT list_select([NULL::{type}], [1])
 ----
 [NULL]
 
@@ -239,7 +236,7 @@ endloop
 query I
 SELECT list_select(['{a: 1}'::BLOB, '{a: 3}'::BLOB], [1,2])
 ----
-[{a: 1}, {a: 3}]
+['{a: 1}', '{a: 3}']
 
 query I
 SELECT list_select([NULL::BLOB], [1])

@@ -24,6 +24,7 @@ set(JSON_EXTENSION_FILES
     json_functions/json_keys.cpp
     json_functions/json_merge_patch.cpp
     json_functions/json_pretty.cpp
+    json_functions/json_table_in_out.cpp
     json_functions/json_structure.cpp
     json_functions/json_transform.cpp
     json_functions/json_create.cpp
@@ -32,6 +33,10 @@ set(JSON_EXTENSION_FILES
     json_functions/json_value.cpp
     json_functions/json_serialize_sql.cpp
     json_functions/json_serialize_plan.cpp
+    json_functions/json_normalize.cpp
+    json_functions/json_deep_merge.cpp
+    json_functions/json_merge_patch_diff.cpp
+    json_functions/json_strip_nulls.cpp
     json_functions/read_json.cpp
     json_functions/read_json_objects.cpp)
 

@@ -2,9 +2,6 @@
 # description: Test As-Of joins for strings
 # group: [asof]
 
-statement ok
-PRAGMA enable_verification
-
 # Join on a string range
 
 statement ok
@@ -30,7 +27,7 @@ CREATE TABLE probe0 AS
 foreach threshold 0 32
 
 statement ok
-PRAGMA asof_loop_join_threshold = ${threshold};
+PRAGMA asof_loop_join_threshold = {threshold};
 
 # INNER ON inequality only
 query II

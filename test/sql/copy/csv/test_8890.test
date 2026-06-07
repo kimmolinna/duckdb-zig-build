@@ -2,16 +2,13 @@
 # description: Test CSV works for #8890
 # group: [csv]
 
-statement ok
-PRAGMA enable_verification
-
 query IIII
 select
     field1,
     field2,
     min(datum) as firstseen,
     max(datum) as lastseen
-from read_csv('data/csv/hebere.csv.gz',
+from read_csv('{DATA_DIR}/csv/hebere.csv.gz',
         delim='\t',
         header=0,
         columns={field1: varchar, field2: varchar, datum: varchar},

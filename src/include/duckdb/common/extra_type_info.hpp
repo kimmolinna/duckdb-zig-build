@@ -11,8 +11,11 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/extension_type_info.hpp"
+#include "duckdb/common/types/geometry_crs.hpp"
 
 namespace duckdb {
+
+class ParsedExpression;
 
 //! Extra Type Info Type
 enum class ExtraTypeInfoType : uint8_t {
@@ -23,11 +26,14 @@ enum class ExtraTypeInfoType : uint8_t {
 	LIST_TYPE_INFO = 4,
 	STRUCT_TYPE_INFO = 5,
 	ENUM_TYPE_INFO = 6,
-	USER_TYPE_INFO = 7,
-	AGGREGATE_STATE_TYPE_INFO = 8,
+	UNBOUND_TYPE_INFO = 7,
+	LEGACY_AGGREGATE_STATE_TYPE_INFO = 8,
 	ARRAY_TYPE_INFO = 9,
 	ANY_TYPE_INFO = 10,
-	INTEGER_LITERAL_TYPE_INFO = 11
+	INTEGER_LITERAL_TYPE_INFO = 11,
+	TEMPLATE_TYPE_INFO = 12,
+	GEO_TYPE_INFO = 13,
+	AGGREGATE_STATE_TYPE_INFO = 14
 };
 
 struct ExtraTypeInfo {
@@ -50,6 +56,7 @@ public:
 	virtual void Serialize(Serializer &serializer) const;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
 	virtual shared_ptr<ExtraTypeInfo> Copy() const;
+	virtual shared_ptr<ExtraTypeInfo> DeepCopy() const;
 
 	template <class TARGET>
 	TARGET &Cast() {
@@ -110,6 +117,7 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
 	shared_ptr<ExtraTypeInfo> Copy() const override;
+	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
 	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
@@ -120,6 +128,7 @@ private:
 
 struct StructTypeInfo : public ExtraTypeInfo {
 	explicit StructTypeInfo(child_list_t<LogicalType> child_types_p);
+	explicit StructTypeInfo(ExtraTypeInfoType type, child_list_t<LogicalType> child_types_p);
 
 	child_list_t<LogicalType> child_types;
 
@@ -127,6 +136,7 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &deserializer);
 	shared_ptr<ExtraTypeInfo> Copy() const override;
+	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
 	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
@@ -135,8 +145,8 @@ private:
 	StructTypeInfo();
 };
 
-struct AggregateStateTypeInfo : public ExtraTypeInfo {
-	explicit AggregateStateTypeInfo(aggregate_state_t state_type_p);
+struct LegacyAggregateStateTypeInfo : public ExtraTypeInfo {
+	explicit LegacyAggregateStateTypeInfo(aggregate_state_t state_type_p);
 
 	aggregate_state_t state_type;
 
@@ -149,36 +159,32 @@ protected:
 	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
 
 private:
-	AggregateStateTypeInfo();
+	LegacyAggregateStateTypeInfo();
 };
 
-struct UserTypeInfo : public ExtraTypeInfo {
-	explicit UserTypeInfo(string name_p);
-	UserTypeInfo(string name_p, vector<Value> modifiers_p);
-	UserTypeInfo(string catalog_p, string schema_p, string name_p, vector<Value> modifiers_p);
+struct AggregateStateTypeInfo : public StructTypeInfo {
+	explicit AggregateStateTypeInfo(aggregate_state_t state_type_p, child_list_t<LogicalType> child_types_p);
 
-	string catalog;
-	string schema;
-	string user_type_name;
-	vector<Value> user_type_modifiers;
+	aggregate_state_t state_type;
 
 public:
 	void Serialize(Serializer &serializer) const override;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
 	shared_ptr<ExtraTypeInfo> Copy() const override;
+	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
 	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
 
 private:
-	UserTypeInfo();
+	AggregateStateTypeInfo();
 };
 
 // If this type is primarily stored in the catalog or not. Enums from Pandas/Factors are not in the catalog.
 enum EnumDictType : uint8_t { INVALID = 0, VECTOR_DICT = 1 };
 
 struct EnumTypeInfo : public ExtraTypeInfo {
-	explicit EnumTypeInfo(Vector &values_insert_order_p, idx_t dict_size_p);
+	explicit EnumTypeInfo(const Vector &values_insert_order_p, idx_t dict_size_p);
 	EnumTypeInfo(const EnumTypeInfo &) = delete;
 	EnumTypeInfo &operator=(const EnumTypeInfo &) = delete;
 
@@ -188,7 +194,7 @@ public:
 	const idx_t &GetDictSize() const;
 	static PhysicalType DictType(idx_t size);
 
-	static LogicalType CreateType(Vector &ordered_data, idx_t size);
+	static LogicalType CreateType(const Vector &ordered_data, idx_t size);
 
 	void Serialize(Serializer &serializer) const override;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
@@ -214,6 +220,7 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &reader);
 	shared_ptr<ExtraTypeInfo> Copy() const override;
+	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
 	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
@@ -229,6 +236,7 @@ public:
 	void Serialize(Serializer &serializer) const override;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
 	shared_ptr<ExtraTypeInfo> Copy() const override;
+	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
 	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
@@ -252,6 +260,54 @@ protected:
 
 private:
 	IntegerLiteralTypeInfo();
+};
+
+struct TemplateTypeInfo : public ExtraTypeInfo {
+	explicit TemplateTypeInfo(string name_p);
+
+	// The name of the template, e.g. `T`, or `KEY_TYPE`. Used to distinguish between different template types within
+	// the same function. The binder tries to resolve all templates with the same name to the same concrete type.
+	string name;
+
+public:
+	void Serialize(Serializer &serializer) const override;
+	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
+	shared_ptr<ExtraTypeInfo> Copy() const override;
+
+protected:
+	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	TemplateTypeInfo();
+};
+
+struct GeoTypeInfo : public ExtraTypeInfo {
+public:
+	GeoTypeInfo();
+
+	void Serialize(Serializer &serializer) const override;
+	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
+	shared_ptr<ExtraTypeInfo> Copy() const override;
+
+	// The Coordinate Reference System associated with this geometry type
+	CoordinateReferenceSystem crs;
+
+protected:
+	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+};
+
+struct UnboundTypeInfo : public ExtraTypeInfo {
+	explicit UnboundTypeInfo(unique_ptr<ParsedExpression> expr_p);
+
+	unique_ptr<ParsedExpression> expr;
+
+	void Serialize(Serializer &serializer) const override;
+	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
+	shared_ptr<ExtraTypeInfo> Copy() const override;
+
+protected:
+	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+
+private:
+	UnboundTypeInfo();
 };
 
 } // namespace duckdb

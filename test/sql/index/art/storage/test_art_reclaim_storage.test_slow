@@ -2,7 +2,7 @@
 # description: Test that the block manager reclaims index memory
 # group: [storage]
 
-load __TEST_DIR__/test_reclaim_space.db
+load {TEST_DIR}/test_reclaim_space.db
 
 statement ok
 CREATE TABLE integers AS SELECT i FROM range(1000000) tbl(i);
@@ -117,6 +117,9 @@ CHECKPOINT;
 # now insert a bunch of values again
 statement ok
 INSERT INTO integers SELECT i FROM range(1000000) tbl(i);
+
+statement ok
+CHECKPOINT;
 
 # and make sure that we do not exceed/hit twice the original size
 

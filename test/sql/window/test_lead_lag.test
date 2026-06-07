@@ -16,6 +16,37 @@ from (values
 4	NULL
 5	NULL
 
+# With named arguments
+query II
+select c1, lead("offset" := 2, col := c1) over (order by c0 rows between 2 preceding and 4 preceding) as b
+from (values
+	(1, 2),
+	(2, 3),
+	(3, 4),
+	(4, 5)
+) a(c0, c1);
+----
+2	4
+3	5
+4	NULL
+5	NULL
+
+# With named arguments an default value for offset
+query II
+select c1, lead("default" := 1337, col := c1) over (order by c0 rows between 2 preceding and 4 preceding) as b
+from (values
+	(1, 2),
+	(2, 3),
+	(3, 4),
+	(4, 5)
+) a(c0, c1);
+----
+2	3
+3	4
+4	5
+5	1337
+
+
 # Lag > 2 with explicit constant default
 statement ok
 create table win(id int, v int, t int, f float, s varchar);
@@ -105,3 +136,33 @@ ORDER BY 2, 1
 2024-01-01	7	1000	late	2024-03-01	dispatched
 2024-02-01	7	1000	dispatched	NULL	NULL
 2024-03-01	7	1000	dispatched	NULL	NULL
+
+# test lag and lead when offset is null
+statement ok
+CREATE TABLE issue17266(c1 INT, c2 SMALLINT, c3 BITSTRING);
+
+statement ok
+INSERT INTO issue17266 VALUES
+(0, null, null),
+(1, 32767, '101'),
+(2, -32767, '101'),
+(3, 0, '000'),
+(4, null, null);
+
+query IIII
+SELECT c1, c3, c2, LAG(c3, c2, BITSTRING'010101010') OVER (PARTITION BY c1 ORDER BY c3) FROM issue17266 ORDER BY c1;
+----
+0	NULL	NULL	NULL
+1	101	32767	010101010
+2	101	-32767	010101010
+3	000	0	000
+4	NULL	NULL	NULL
+
+query IIII
+SELECT c1, c3, c2, LEAD(c3, c2, BITSTRING'010101010') OVER (PARTITION BY c1 ORDER BY c3) FROM issue17266 ORDER BY c1;
+----
+0	NULL	NULL	NULL
+1	101	32767	010101010
+2	101	-32767	010101010
+3	000	0	000
+4	NULL	NULL	NULL

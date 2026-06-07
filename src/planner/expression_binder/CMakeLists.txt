@@ -1,7 +1,6 @@
 add_library_unity(
   duckdb_expression_binders
   OBJECT
-  aggregate_binder.cpp
   alter_binder.cpp
   base_select_binder.cpp
   check_binder.cpp
@@ -14,6 +13,7 @@ add_library_unity(
   index_binder.cpp
   insert_binder.cpp
   order_binder.cpp
+  projection_binder.cpp
   relation_binder.cpp
   returning_binder.cpp
   select_binder.cpp

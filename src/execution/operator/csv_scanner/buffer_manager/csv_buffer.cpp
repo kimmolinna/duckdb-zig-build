@@ -1,13 +1,14 @@
 #include "duckdb/execution/operator/csv_scanner/csv_buffer.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
 CSVBuffer::CSVBuffer(ClientContext &context, idx_t buffer_size_p, CSVFileHandle &file_handle,
-                     idx_t &global_csv_current_position)
+                     const idx_t &global_csv_current_position)
     : context(context), requested_size(buffer_size_p), can_seek(file_handle.CanSeek()), is_pipe(file_handle.IsPipe()) {
 	AllocateBuffer(buffer_size_p);
-	auto buffer = Ptr();
+	auto buffer = char_ptr_cast(handle.GetDataMutable());
 	actual_buffer_size = file_handle.Read(buffer, buffer_size_p);
 	while (actual_buffer_size < buffer_size_p && !file_handle.FinishedReading()) {
 		// We keep reading until this block is full
@@ -22,8 +23,8 @@ CSVBuffer::CSVBuffer(CSVFileHandle &file_handle, ClientContext &context, idx_t b
     : context(context), requested_size(buffer_size), global_csv_start(global_csv_current_position),
       can_seek(file_handle.CanSeek()), is_pipe(file_handle.IsPipe()), buffer_idx(buffer_idx_p) {
 	AllocateBuffer(buffer_size);
-	auto buffer = handle.Ptr();
-	actual_buffer_size = file_handle.Read(handle.Ptr(), buffer_size);
+	auto buffer = handle.GetDataMutable();
+	actual_buffer_size = file_handle.Read(buffer, buffer_size);
 	while (actual_buffer_size < buffer_size && !file_handle.FinishedReading()) {
 		// We keep reading until this block is full
 		actual_buffer_size += file_handle.Read(&buffer[actual_buffer_size], buffer_size - actual_buffer_size);
@@ -31,12 +32,12 @@ CSVBuffer::CSVBuffer(CSVFileHandle &file_handle, ClientContext &context, idx_t b
 	last_buffer = file_handle.FinishedReading();
 }
 
-shared_ptr<CSVBuffer> CSVBuffer::Next(CSVFileHandle &file_handle, idx_t buffer_size, bool &has_seaked) {
-	if (has_seaked) {
+shared_ptr<CSVBuffer> CSVBuffer::Next(CSVFileHandle &file_handle, idx_t buffer_size, bool &has_seeked) const {
+	if (has_seeked) {
 		// This means that at some point a reload was done, and we are currently on the incorrect position in our file
 		// handle
 		file_handle.Seek(global_csv_start + actual_buffer_size);
-		has_seaked = false;
+		has_seeked = false;
 	}
 	auto next_csv_buffer = make_shared_ptr<CSVBuffer>(file_handle, context, buffer_size,
 	                                                  global_csv_start + actual_buffer_size, buffer_idx + 1);
@@ -63,12 +64,12 @@ void CSVBuffer::Reload(CSVFileHandle &file_handle) {
 	AllocateBuffer(actual_buffer_size);
 	// If we can seek, we seek and return the correct pointers
 	file_handle.Seek(global_csv_start);
-	file_handle.Read(handle.Ptr(), actual_buffer_size);
+	file_handle.Read(handle.GetDataMutable(), actual_buffer_size);
 }
 
 shared_ptr<CSVBufferHandle> CSVBuffer::Pin(CSVFileHandle &file_handle, bool &has_seeked) {
 	auto &buffer_manager = BufferManager::GetBufferManager(context);
-	if (!is_pipe && block->IsUnloaded()) {
+	if (!block || (!is_pipe && block->GetMemory().IsUnloaded())) {
 		// We have to reload it from disk
 		block = nullptr;
 		Reload(file_handle);

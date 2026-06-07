@@ -1,8 +1,6 @@
 #include "dbgen/dbgen.hpp"
 #include "dbgen/dbgen_gunk.hpp"
 #include "tpch_constants.hpp"
-
-#ifndef DUCKDB_AMALGAMATION
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/parser/column_definition.hpp"
@@ -11,10 +9,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/appender.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#ifndef DUCKDB_NO_THREADS
-#include "duckdb/common/thread.hpp"
-#endif
-#endif
+#include "duckdb/parallel/task_executor.hpp"
 
 #define DECLARER /* EXTERN references get defined here */
 
@@ -262,7 +257,7 @@ static void gen_tbl(ClientContext &context, int tnum, DSS_HUGE count, tpch_appen
 	code_t code;
 
 	for (DSS_HUGE i = offset + 1; count; count--, i++) {
-		if (count % 1000 == 0 && context.interrupted) {
+		if (count % 1000 == 0 && context.IsInterrupted()) {
 			return;
 		}
 		row_start(tnum, dbgen_ctx);
@@ -503,6 +498,9 @@ public:
 		for (size_t i = PART; i <= REGION; i++) {
 			if (parameters.tables[i]) {
 				auto &tbl_catalog = *parameters.tables[i];
+				if (!tbl_catalog.IsDuckTable()) {
+					throw InvalidInputException("dbgen is only supported for DuckDB database files");
+				}
 				append_info[i].appender = make_uniq<InternalAppender>(context, tbl_catalog, flush_count);
 			}
 		}
@@ -522,7 +520,7 @@ public:
 				} else {
 					rowcnt = dbgen_ctx.tdefs[i].base;
 				}
-				if (context.interrupted) {
+				if (context.IsInterrupted()) {
 					return;
 				}
 				if (children > 1 && current_step != -1) {
@@ -560,9 +558,25 @@ private:
 	DBGenContext dbgen_ctx;
 };
 
-static void ParallelTPCHAppend(TPCHDataAppender *appender, int children, int current_step) {
-	appender->AppendData(children, current_step);
-}
+class ParallelTPCHAppendTask : public BaseExecutorTask {
+public:
+	ParallelTPCHAppendTask(TaskExecutor &executor, TPCHDataAppender &appender, int children, int current_step)
+		: BaseExecutorTask(executor), appender(appender), children(children), current_step(current_step) {
+	}
+
+	void ExecuteTask() override {
+		appender.AppendData(children, current_step);
+	}
+
+	string TaskType() const override {
+		return "ParallelTPCHAppend";
+	}
+
+private:
+	TPCHDataAppender &appender;
+	int children;
+	int current_step;
+};
 
 void DBGenWrapper::LoadTPCHData(ClientContext &context, double flt_scale, string catalog_name, string schema,
                                 string suffix, int children, int current_step) {
@@ -649,37 +663,35 @@ void DBGenWrapper::LoadTPCHData(ClientContext &context, double flt_scale, string
 		vector<TPCHDataAppender> finished_appenders;
 		while(step < child_count) {
 			// launch N threads
+			TaskExecutor executor(context);
+
 			vector<TPCHDataAppender> new_appenders;
-			vector<std::thread> threads;
 			idx_t launched_step = step;
 			// initialize the appenders for each thread
 			// note we prevent the threads themselves from flushing the appenders by specifying a very high flush count here
 			for(idx_t thr_idx = 0; thr_idx < thread_count && launched_step < child_count; thr_idx++, launched_step++) {
 				new_appenders.emplace_back(context, parameters, base_context, NumericLimits<int64_t>::Maximum());
 			}
-			// launch the threads
-			for(idx_t thr_idx = 0; thr_idx < new_appenders.size(); thr_idx++) {
-				threads.emplace_back(ParallelTPCHAppend, &new_appenders[thr_idx], child_count, step);
+			// schedule tasks for all appenders
+			for(auto &appender : new_appenders) {
+				auto task = make_uniq<ParallelTPCHAppendTask>(executor, appender, child_count, step);
+				executor.ScheduleTask(std::move(task));
 				step++;
 			}
-			ErrorData error;
-			try {
-				// flush the previous batch of appenders while waiting (if any are there)
-				// now flush the appenders in-order
-				for(auto &appender : finished_appenders) {
-					appender.Flush();
-				}
-			} catch(std::exception &ex) {
-				error = ErrorData(ex);
+			// complete all tasks
+			executor.WorkOnTasks();
+			if (executor.HasError()) {
+				executor.ThrowError();
+			}
+			// flush the previous batch of appenders while waiting (if any are there)
+			// now flush the appenders in-order
+			// NOTE: do NOT catch exceptions here - if Flush() fails, let the exception
+			// propagate so that all appender destructors run with UncaughtException() == true,
+			// preventing them from re-attempting a flush on already-inconsistent local storage.
+			for(auto &appender : finished_appenders) {
+				appender.Flush();
 			}
 			finished_appenders.clear();
-			// wait for all threads to finish
-			for(auto &thread : threads) {
-				thread.join();
-			}
-			if (error.HasError()) {
-				error.Throw();
-			}
 			finished_appenders = std::move(new_appenders);
 		}
 		// flush the final batch of appenders

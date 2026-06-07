@@ -10,8 +10,11 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/deque.hpp"
+#include "duckdb/common/enums/metric_type.hpp"
 #include "duckdb/common/enums/profiler_format.hpp"
 #include "duckdb/common/enums/explain_format.hpp"
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/profiler.hpp"
 #include "duckdb/common/reference_map.hpp"
@@ -21,100 +24,62 @@
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/execution/expression_executor_state.hpp"
 #include "duckdb/execution/physical_operator.hpp"
-#include "duckdb/main/profiling_info.hpp"
 #include "duckdb/main/profiling_node.hpp"
-
-#include <stack>
+#include "duckdb/main/profiling_utils.hpp"
 
 namespace duckdb {
+
 class ClientContext;
 class ExpressionExecutor;
 class ProfilingNode;
 class PhysicalOperator;
 class SQLStatement;
+struct MetricsTimer;
+class OperatorProfiler;
 
-struct OperatorInformation {
-	explicit OperatorInformation(double time_p = 0, idx_t elements_returned_p = 0, idx_t elements_scanned_p = 0,
-	                             idx_t result_set_size_p = 0)
-	    : time(time_p), elements_returned(elements_returned_p), result_set_size(result_set_size_p) {
-	}
+enum class ProfilingCoverage : uint8_t { SELECT = 0, ALL = 1 };
 
-	double time;
-	idx_t elements_returned;
-	idx_t result_set_size;
-	string name;
-	InsertionOrderPreservingMap<string> extra_info;
+//! A JSON-like recursive profiling value.
+//! FIXME: this should at some point be replaced by a "Value" - but that's not easily possible until our VARIANT Value
+//! is extended to be able to easily hold arbitrary values
+enum class QueryProfileResultKind {
+	VALUE,
+	LIST,
+	OBJECT,
+};
 
-	void AddTime(double n_time) {
-		time += n_time;
-	}
+struct QueryProfileResult {
+	QueryProfileResultKind kind = QueryProfileResultKind::OBJECT;
+	//! Non-empty for children of an OBJECT node; empty for LIST items and the root
+	string key;
+	//! Valid when kind == VALUE
+	Value value;
+	//! Ordered children; valid when kind == LIST or OBJECT
+	vector<unique_ptr<QueryProfileResult>> children;
 
-	void AddReturnedElements(idx_t n_elements) {
-		elements_returned += n_elements;
-	}
-
-	void AddResultSetSize(idx_t n_result_set_size) {
-		result_set_size += n_result_set_size;
+	//! Add a named VALUE leaf to this OBJECT node
+	void AddValue(const string &k, Value val);
+	//! Add a named OBJECT child to this OBJECT node; returns the new child
+	QueryProfileResult &AddObject(const string &k);
+	//! Add a named LIST child to this OBJECT node; returns the new child
+	QueryProfileResult &AddList(const string &k);
+	//! Append an anonymous OBJECT item to this LIST node; returns the new item
+	QueryProfileResult &AppendObject();
+	//! Append an anonymous LIST item to this node; returns the new item
+	QueryProfileResult &AppendList();
+	//! Returns true if this node is a nested type (OBJECT or LIST)
+	bool IsNested() const {
+		return kind == QueryProfileResultKind::OBJECT || kind == QueryProfileResultKind::LIST;
 	}
 };
 
-//! The OperatorProfiler measures timings of individual operators
-//! This class exists once for all operators and collects `OperatorInfo` for each operator
-class OperatorProfiler {
-	friend class QueryProfiler;
-
-public:
-	DUCKDB_API explicit OperatorProfiler(ClientContext &context);
-	~OperatorProfiler() {
-	}
-
-public:
-	DUCKDB_API void StartOperator(optional_ptr<const PhysicalOperator> phys_op);
-	DUCKDB_API void EndOperator(optional_ptr<DataChunk> chunk);
-
-	//! Adds the timings in the OperatorProfiler (tree) to the QueryProfiler (tree).
-	DUCKDB_API void Flush(const PhysicalOperator &phys_op);
-	DUCKDB_API OperatorInformation &GetOperatorInfo(const PhysicalOperator &phys_op);
-
-public:
-	ClientContext &context;
-
-private:
-	//! Whether or not the profiler is enabled
-	bool enabled;
-	//! Sub-settings for the operator profiler
-	profiler_settings_t settings;
-
-	//! The timer used to time the execution time of the individual Physical Operators
-	Profiler op;
-	//! The stack of Physical Operators that are currently active
-	optional_ptr<const PhysicalOperator> active_operator;
-	//! A mapping of physical operators to profiled operator information.
-	reference_map_t<const PhysicalOperator, OperatorInformation> operator_infos;
-};
-
-struct QueryInfo {
-	QueryInfo() : blocked_thread_time(0) {};
-	string query_name;
-	double blocked_thread_time;
-};
-
-//! The QueryProfiler can be used to measure timings of queries
+//! QueryProfiler collects the profiling metrics of a query.
 class QueryProfiler {
 public:
-	DUCKDB_API explicit QueryProfiler(ClientContext &context);
-
-public:
-	// Propagate save_location, enabled, detailed_enabled and automatic_print_format.
-	void Propagate(QueryProfiler &qp);
-
 	using TreeMap = reference_map_t<const PhysicalOperator, reference<ProfilingNode>>;
 
-private:
-	unique_ptr<ProfilingNode> CreateTree(const PhysicalOperator &root, const profiler_settings_t &settings,
-	                                     const idx_t depth = 0);
-	void Render(const ProfilingNode &node, std::ostream &str) const;
-	string RenderDisabledMessage(ProfilerPrintFormat format) const;
+public:
+	DUCKDB_API explicit QueryProfiler(ClientContext &context);
 
 public:
 	DUCKDB_API bool IsEnabled() const;
@@ -125,18 +90,42 @@ public:
 
 	DUCKDB_API static QueryProfiler &Get(ClientContext &context);
 
-	DUCKDB_API void StartQuery(string query, bool is_explain_analyze = false, bool start_at_optimizer = false);
+	DUCKDB_API void Start(const string &query);
+	DUCKDB_API void Reset();
+	DUCKDB_API void StartQuery(const string &query, bool is_explain_analyze = false, bool start_at_optimizer = false);
 	DUCKDB_API void EndQuery();
+	//! Finalize query metrics for output; safe to call multiple times.
+	DUCKDB_API void FinalizeMetrics();
+
+	//! Track bytes read (always tracked, even when profiling disabled).
+	DUCKDB_API void TrackBytesRead(idx_t amount);
+	//! Track bytes written (always tracked, even when profiling disabled).
+	DUCKDB_API void TrackBytesWritten(idx_t amount);
+	//! Track memory allocated (thread-safe; always tracked).
+	DUCKDB_API void TrackTotalMemoryAllocated(idx_t amount);
+	//! Add to a metric counter (profiling-only).
+	DUCKDB_API void AddToMetricCounter(const string &key, idx_t amount);
+
+	//! Set an arbitrary metric value (profiling-only; no-op when profiling is disabled).
+	DUCKDB_API void SetMetric(const string &key, Value new_value);
+	//! Returns true if the given metric is currently being tracked.
+	//! Always returns false when profiling is disabled.
+	DUCKDB_API bool MetricIsTracked(const string &key) const;
+
+	//! Start a timer for a metric identified by its struct type.
+	template <class METRIC>
+	MetricsTimer StartTimer() {
+		return StartTimerInternal(METRIC::Name);
+	}
+	//! Start a timer for a string-keyed metric (use the template overload when possible).
+	DUCKDB_API MetricsTimer StartTimerInternal(const string &key);
 
 	DUCKDB_API void StartExplainAnalyze();
 
 	//! Adds the timings gathered by an OperatorProfiler to this query profiler
 	DUCKDB_API void Flush(OperatorProfiler &profiler);
 	//! Adds the top level query information to the global profiler.
-	DUCKDB_API void SetInfo(const double &blocked_thread_time);
-
-	DUCKDB_API void StartPhase(MetricsType phase_metric);
-	DUCKDB_API void EndPhase();
+	DUCKDB_API void SetBlockedTime(const double &blocked_thread_time);
 
 	DUCKDB_API void Initialize(const PhysicalOperator &root);
 
@@ -149,29 +138,25 @@ public:
 	DUCKDB_API string ToString(ExplainFormat format = ExplainFormat::DEFAULT) const;
 	DUCKDB_API string ToString(ProfilerPrintFormat format) const;
 
-	static InsertionOrderPreservingMap<string> JSONSanitize(const InsertionOrderPreservingMap<string> &input);
+	// Sanitize a Value::MAP
+	static Value JSONSanitize(const Value &input);
 	static string JSONSanitize(const string &text);
 	static string DrawPadded(const string &str, idx_t width);
+	DUCKDB_API void ToLog() const;
 	DUCKDB_API string ToJSON() const;
 	DUCKDB_API void WriteToFile(const char *path, string &info) const;
+	DUCKDB_API idx_t GetBytesRead() const;
+	DUCKDB_API idx_t GetBytesWritten() const;
 
-	idx_t OperatorSize() {
-		return tree_map.size();
-	}
+	//! Return the result tree (generating it if it does not yet exist)
+	QueryProfileResult &GetResult();
+	//! Returns true if the last query produced a profiling tree (i.e. profiling was enabled and the query succeeded)
+	bool HasRoot() const;
 
-	void Finalize(ProfilingNode &node);
-
-	//! Return the root of the query tree
-	optional_ptr<ProfilingNode> GetRoot() {
-		return root.get();
-	}
-
-	//! Provides access to the root of the query tree, but ensures there are no concurrent modifications
-	//! This can be useful when implementing continuous profiling or making customizations
-	DUCKDB_API void GetRootUnderLock(const std::function<void(optional_ptr<ProfilingNode>)> &callback) {
-		lock_guard<std::mutex> guard(lock);
-		callback(GetRoot());
-	}
+private:
+	unique_ptr<ProfilingNode> CreateTree(const PhysicalOperator &root, const idx_t depth = 0);
+	void Render(const ProfilingNode &node, std::ostream &str) const;
+	string RenderDisabledMessage(ProfilerPrintFormat format) const;
 
 private:
 	ClientContext &context;
@@ -187,14 +172,19 @@ private:
 	//! The root of the query tree
 	unique_ptr<ProfilingNode> root;
 
+	unique_ptr<GatheredMetrics> metrics;
+
 	//! Top level query information.
-	QueryInfo query_info;
-	//! The timer used to time the execution time of the entire query
-	Profiler main_query;
+	QueryMetrics query_metrics;
+
+	unique_ptr<QueryProfileResult> result_tree;
+
 	//! A map of a Physical Operator pointer to a tree node
 	TreeMap tree_map;
 	//! Whether or not we are running as part of a explain_analyze query
 	bool is_explain_analyze;
+	//! Whether root metrics have been finalized for output
+	bool metrics_finalized;
 
 public:
 	const TreeMap &GetTreeMap() const {
@@ -202,21 +192,16 @@ public:
 	}
 
 private:
-	//! The timer used to time the individual phases of the planning process
-	Profiler phase_profiler;
-	//! A mapping of the phase names to the timings
-	using PhaseTimingStorage = unordered_map<MetricsType, double, MetricsTypeHashFunction>;
-	PhaseTimingStorage phase_timings;
-	using PhaseTimingItem = PhaseTimingStorage::value_type;
-	//! The stack of currently active phases
-	vector<MetricsType> phase_stack;
+	void FinalizeMetricsInternal();
+	//! Write metrics to log without acquiring the lock (must be called with lock held).
+	void ToLogInternal() const;
 
-private:
-	void MoveOptimizerPhasesToRoot();
+	unique_ptr<QueryProfileResult> ToResultTree() const;
+	unique_ptr<QueryProfileResult> ToLegacyResultTree() const;
 
 	//! Check whether or not an operator type requires query profiling. If none of the ops in a query require profiling
 	//! no profiling information is output.
-	bool OperatorRequiresProfiling(PhysicalOperatorType op_type);
+	bool OperatorRequiresProfiling(const PhysicalOperatorType op_type);
 	ExplainFormat GetExplainFormat(ProfilerPrintFormat format) const;
 };
 

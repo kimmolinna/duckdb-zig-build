@@ -27,6 +27,10 @@
 #include "duckdb/parser/query_node.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/query_node/set_operation_node.hpp"
+#include "duckdb/parser/query_node/update_query_node.hpp"
+#include "duckdb/parser/query_node/delete_query_node.hpp"
+#include "duckdb/parser/query_node/insert_query_node.hpp"
+#include "duckdb/parser/query_node/merge_query_node.hpp"
 #include "duckdb/parser/statement/list.hpp"
 #include "duckdb/parser/tableref/list.hpp"
 #include "duckdb/planner/expression/list.hpp"
@@ -39,7 +43,6 @@
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
 #include "duckdb/transaction/transaction.hpp"
-#include "duckdb/common/types/row/row_data_collection.hpp"
 
 using namespace duckdb;
 
@@ -61,6 +64,10 @@ template class unique_ptr<VacuumStatement>;
 template class unique_ptr<QueryNode>;
 template class unique_ptr<SelectNode>;
 template class unique_ptr<SetOperationNode>;
+template class unique_ptr<UpdateQueryNode>;
+template class unique_ptr<DeleteQueryNode>;
+template class unique_ptr<InsertQueryNode>;
+template class unique_ptr<MergeQueryNode>;
 template class unique_ptr<ParsedExpression>;
 template class unique_ptr<CaseExpression>;
 template class unique_ptr<CastExpression>;
@@ -87,8 +94,6 @@ template class unique_ptr<SubqueryRef>;
 template class unique_ptr<TableFunctionRef>;
 template class unique_ptr<Pipeline>;
 template class unique_ptr<RowGroup>;
-template class unique_ptr<RowDataBlock>;
-template class unique_ptr<RowDataCollection>;
 template class unique_ptr<ColumnDataCollection>;
 template class unique_ptr<PartitionedColumnData>;
 template class unique_ptr<VacuumInfo>;
@@ -101,7 +106,6 @@ template class unique_ptr<BoundAggregateExpression>;
 template class unique_ptr<BoundCaseExpression>;
 template class unique_ptr<BoundCastExpression>;
 template class unique_ptr<BoundColumnRefExpression>;
-template class unique_ptr<BoundComparisonExpression>;
 template class unique_ptr<BoundConjunctionExpression>;
 template class unique_ptr<BoundConstantExpression>;
 template class unique_ptr<BoundDefaultExpression>;
@@ -111,7 +115,6 @@ template class unique_ptr<BoundParameterExpression>;
 template class unique_ptr<BoundReferenceExpression>;
 template class unique_ptr<BoundSubqueryExpression>;
 template class unique_ptr<BoundWindowExpression>;
-template class unique_ptr<BoundBaseTableRef>;
 
 template class unique_ptr<CatalogEntry>;
 template class unique_ptr<BindContext>;
@@ -188,7 +191,6 @@ INSTANTIATE_VECTOR(vector<shared_ptr<MetaPipeline>>)
 INSTANTIATE_VECTOR(vector<unique_ptr<JoinHashTable>>)
 INSTANTIATE_VECTOR(vector<unique_ptr<ColumnDataCollection>>)
 INSTANTIATE_VECTOR(vector<shared_ptr<ColumnDataAllocator>>)
-INSTANTIATE_VECTOR(vector<unique_ptr<RowDataBlock>>)
 
 template class duckdb::vector<ExpressionType>;
 template class duckdb::vector<uint64_t>;

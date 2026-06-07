@@ -1,12 +1,8 @@
 #include "duckdb/function/table/system_functions.hpp"
 
-#include "duckdb/common/file_system.hpp"
-#include "duckdb/common/map.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/database.hpp"
-#include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
 namespace duckdb {
@@ -37,6 +33,9 @@ static unique_ptr<FunctionData> DuckDBSecretsBind(ClientContext &context, TableF
 
 	auto entry = input.named_parameters.find("redact");
 	if (entry != input.named_parameters.end()) {
+		if (entry->second.IsNull()) {
+			throw InvalidInputException("Cannot use NULL as argument for redact");
+		}
 		if (BooleanValue::Get(entry->second)) {
 			result->redact = SecretDisplayType::REDACTED;
 		} else {
@@ -44,8 +43,7 @@ static unique_ptr<FunctionData> DuckDBSecretsBind(ClientContext &context, TableF
 		}
 	}
 
-	if (!DBConfig::GetConfig(context).options.allow_unredacted_secrets &&
-	    result->redact == SecretDisplayType::UNREDACTED) {
+	if (!Settings::Get<AllowUnredactedSecretsSetting>(context) && result->redact == SecretDisplayType::UNREDACTED) {
 		throw InvalidInputException("Displaying unredacted secrets is disabled");
 	}
 
@@ -97,6 +95,22 @@ void DuckDBSecretsFunction(ClientContext &context, TableFunctionInput &data_p, D
 	// start returning values
 	// either fill up the chunk or return all the remaining columns
 	idx_t count = 0;
+
+	// name
+	auto &name = output.data[0];
+	// type
+	auto &type = output.data[1];
+	// provider
+	auto &provider = output.data[2];
+	// persistent
+	auto &persistent = output.data[3];
+	// storage
+	auto &storage = output.data[4];
+	// scope
+	auto &scope = output.data[5];
+	// secret_string
+	auto &secret_string = output.data[6];
+
 	while (data.offset < secrets.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &secret_entry = secrets[data.offset];
 
@@ -107,26 +121,17 @@ void DuckDBSecretsFunction(ClientContext &context, TableFunctionInput &data_p, D
 
 		const auto &secret = *secret_entry.secret;
 
-		idx_t i = 0;
-		// name
-		output.SetValue(i++, count, secret.GetName());
-		// type
-		output.SetValue(i++, count, Value(secret.GetType()));
-		// provider
-		output.SetValue(i++, count, Value(secret.GetProvider()));
-		// persistent
-		output.SetValue(i++, count, Value(secret_entry.persist_type == SecretPersistType::PERSISTENT));
-		// storage
-		output.SetValue(i++, count, Value(secret_entry.storage_mode));
-		// scope
-		output.SetValue(i++, count, Value::LIST(LogicalType::VARCHAR, scope_value));
-		// secret_string
-		output.SetValue(i++, count, secret.ToString(bind_data.redact));
+		name.Append(Value(secret.GetName()));
+		type.Append(Value(secret.GetType()));
+		provider.Append(Value(secret.GetProvider()));
+		persistent.Append(Value::BOOLEAN(secret_entry.persist_type == SecretPersistType::PERSISTENT));
+		storage.Append(Value(secret_entry.storage_mode));
+		scope.Append(Value::LIST(LogicalType::VARCHAR, scope_value));
+		secret_string.Append(Value(secret.ToString(bind_data.redact)));
 
 		data.offset++;
 		count++;
 	}
-	output.SetCardinality(count);
 }
 
 void DuckDBSecretsFun::RegisterFunction(BuiltinFunctions &set) {

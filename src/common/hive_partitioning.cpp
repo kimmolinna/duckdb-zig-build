@@ -7,7 +7,7 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/table_filter.hpp"
-#include "duckdb/common/multi_file_list.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 
 namespace duckdb {
 
@@ -21,9 +21,9 @@ struct PartitioningColumnValue {
 	string value;
 };
 
-static unordered_map<column_t, PartitioningColumnValue>
+static unordered_map<ProjectionIndex, PartitioningColumnValue>
 GetKnownColumnValues(const string &filename, const HivePartitioningFilterInfo &filter_info) {
-	unordered_map<column_t, PartitioningColumnValue> result;
+	unordered_map<ProjectionIndex, PartitioningColumnValue> result;
 
 	auto &column_map = filter_info.column_map;
 	if (filter_info.filename_enabled) {
@@ -48,18 +48,19 @@ GetKnownColumnValues(const string &filename, const HivePartitioningFilterInfo &f
 }
 
 // Takes an expression and converts a list of known column_refs to constants
-static void ConvertKnownColRefToConstants(ClientContext &context, unique_ptr<Expression> &expr,
-                                          const unordered_map<column_t, PartitioningColumnValue> &known_column_values,
-                                          idx_t table_index) {
+static void
+ConvertKnownColRefToConstants(ClientContext &context, unique_ptr<Expression> &expr,
+                              const unordered_map<ProjectionIndex, PartitioningColumnValue> &known_column_values,
+                              TableIndex table_index) {
 	if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &bound_colref = expr->Cast<BoundColumnRefExpression>();
 
 		// This bound column ref is for another table
-		if (table_index != bound_colref.binding.table_index) {
+		if (table_index != bound_colref.Binding().table_index) {
 			return;
 		}
 
-		auto lookup = known_column_values.find(bound_colref.binding.column_index);
+		auto lookup = known_column_values.find(bound_colref.Binding().column_index);
 		if (lookup != known_column_values.end()) {
 			auto &partition_val = lookup->second;
 			Value result_val;
@@ -69,7 +70,7 @@ static void ConvertKnownColRefToConstants(ClientContext &context, unique_ptr<Exp
 			} else {
 				// hive partitioning column - cast the value to the target type
 				result_val = HivePartitioning::GetValue(context, partition_val.key, partition_val.value,
-				                                        bound_colref.return_type);
+				                                        bound_colref.GetReturnType());
 			}
 			expr = make_uniq<BoundConstantExpression>(std::move(result_val));
 		}
@@ -86,6 +87,10 @@ string HivePartitioning::Escape(const string &input) {
 
 string HivePartitioning::Unescape(const string &input) {
 	return StringUtil::URLDecode(input);
+}
+
+bool HivePartitioning::IsNull(const string &input) {
+	return StringUtil::CIEquals(input, "NULL") || input == "__HIVE_DEFAULT_PARTITION__";
 }
 
 // matches hive partitions in file name. For example:
@@ -126,7 +131,7 @@ std::map<string, string> HivePartitioning::Parse(const string &filename) {
 Value HivePartitioning::GetValue(ClientContext &context, const string &key, const string &str_val,
                                  const LogicalType &type) {
 	// Handle nulls
-	if (StringUtil::CIEquals(str_val, "NULL")) {
+	if (IsNull(str_val)) {
 		return Value(type);
 	}
 	if (type.id() == LogicalTypeId::VARCHAR) {
@@ -149,12 +154,11 @@ Value HivePartitioning::GetValue(ClientContext &context, const string &key, cons
 
 // TODO: this can still be improved by removing the parts of filter expressions that are true for all remaining files.
 //		 currently, only expressions that cannot be evaluated during pushdown are removed.
-void HivePartitioning::ApplyFiltersToFileList(ClientContext &context, vector<string> &files,
+void HivePartitioning::ApplyFiltersToFileList(ClientContext &context, vector<OpenFileInfo> &files,
                                               vector<unique_ptr<Expression>> &filters,
                                               const HivePartitioningFilterInfo &filter_info,
                                               MultiFilePushdownInfo &info) {
-
-	vector<string> pruned_files;
+	vector<OpenFileInfo> pruned_files;
 	vector<bool> have_preserved_filter(filters.size(), false);
 	vector<unique_ptr<Expression>> pruned_filters;
 	unordered_set<idx_t> filters_applied_to_files;
@@ -167,7 +171,7 @@ void HivePartitioning::ApplyFiltersToFileList(ClientContext &context, vector<str
 	for (idx_t i = 0; i < files.size(); i++) {
 		auto &file = files[i];
 		bool should_prune_file = false;
-		auto known_values = GetKnownColumnValues(file, filter_info);
+		auto known_values = GetKnownColumnValues(file.path, filter_info);
 
 		for (idx_t j = 0; j < filters.size(); j++) {
 			auto &filter = filters[j];
@@ -234,101 +238,79 @@ static inline Value GetHiveKeyNullValue(const LogicalType &type) {
 }
 
 template <class T>
-static void TemplatedGetHivePartitionValues(Vector &input, vector<HivePartitionKey> &keys, const idx_t col_idx,
-                                            const idx_t count) {
-	UnifiedVectorFormat format;
-	input.ToUnifiedFormat(count, format);
-
-	const auto &sel = *format.sel;
-	const auto data = UnifiedVectorFormat::GetData<T>(format);
-	const auto &validity = format.validity;
-
+static void TemplatedGetHivePartitionValues(const Vector &input, vector<HivePartitionKey> &keys, const idx_t col_idx) {
+	auto entries = input.Values<T>();
 	const auto &type = input.GetType();
 
-	const auto reinterpret = Value::CreateValue<T>(data[sel.get_index(0)]).GetTypeMutable() != type;
-	if (reinterpret) {
-		for (idx_t i = 0; i < count; i++) {
-			auto &key = keys[i];
-			const auto idx = sel.get_index(i);
-			if (validity.RowIsValid(idx)) {
-				key.values[col_idx] = GetHiveKeyValue(data[idx], type);
-			} else {
-				key.values[col_idx] = GetHiveKeyNullValue(type);
-			}
-		}
-	} else {
-		for (idx_t i = 0; i < count; i++) {
-			auto &key = keys[i];
-			const auto idx = sel.get_index(i);
-			if (validity.RowIsValid(idx)) {
-				key.values[col_idx] = GetHiveKeyValue(data[idx]);
-			} else {
-				key.values[col_idx] = GetHiveKeyNullValue(type);
-			}
+	for (idx_t i = 0; i < input.size(); i++) {
+		auto &key = keys[i];
+		auto entry = entries[i];
+		if (entry.IsValid()) {
+			key.values[col_idx] = GetHiveKeyValue(entry.GetValue(), type);
+		} else {
+			key.values[col_idx] = GetHiveKeyNullValue(type);
 		}
 	}
 }
 
-static void GetNestedHivePartitionValues(Vector &input, vector<HivePartitionKey> &keys, const idx_t col_idx,
-                                         const idx_t count) {
-	for (idx_t i = 0; i < count; i++) {
+static void GetNestedHivePartitionValues(const Vector &input, vector<HivePartitionKey> &keys, const idx_t col_idx) {
+	for (idx_t i = 0; i < input.size(); i++) {
 		auto &key = keys[i];
 		key.values[col_idx] = input.GetValue(i);
 	}
 }
 
-static void GetHivePartitionValuesTypeSwitch(Vector &input, vector<HivePartitionKey> &keys, const idx_t col_idx,
-                                             const idx_t count) {
+static void GetHivePartitionValuesTypeSwitch(const Vector &input, vector<HivePartitionKey> &keys, const idx_t col_idx) {
 	const auto &type = input.GetType();
 	switch (type.InternalType()) {
 	case PhysicalType::BOOL:
-		TemplatedGetHivePartitionValues<bool>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<bool>(input, keys, col_idx);
 		break;
 	case PhysicalType::INT8:
-		TemplatedGetHivePartitionValues<int8_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<int8_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::INT16:
-		TemplatedGetHivePartitionValues<int16_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<int16_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::INT32:
-		TemplatedGetHivePartitionValues<int32_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<int32_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::INT64:
-		TemplatedGetHivePartitionValues<int64_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<int64_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::INT128:
-		TemplatedGetHivePartitionValues<hugeint_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<hugeint_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::UINT8:
-		TemplatedGetHivePartitionValues<uint8_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<uint8_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::UINT16:
-		TemplatedGetHivePartitionValues<uint16_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<uint16_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::UINT32:
-		TemplatedGetHivePartitionValues<uint32_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<uint32_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::UINT64:
-		TemplatedGetHivePartitionValues<uint64_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<uint64_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::UINT128:
-		TemplatedGetHivePartitionValues<uhugeint_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<uhugeint_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::FLOAT:
-		TemplatedGetHivePartitionValues<float>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<float>(input, keys, col_idx);
 		break;
 	case PhysicalType::DOUBLE:
-		TemplatedGetHivePartitionValues<double>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<double>(input, keys, col_idx);
 		break;
 	case PhysicalType::INTERVAL:
-		TemplatedGetHivePartitionValues<interval_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<interval_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::VARCHAR:
-		TemplatedGetHivePartitionValues<string_t>(input, keys, col_idx, count);
+		TemplatedGetHivePartitionValues<string_t>(input, keys, col_idx);
 		break;
 	case PhysicalType::STRUCT:
 	case PhysicalType::LIST:
-		GetNestedHivePartitionValues(input, keys, col_idx, count);
+		GetNestedHivePartitionValues(input, keys, col_idx);
 		break;
 	default:
 		throw InternalException("Unsupported type for HivePartitionedColumnData::ComputePartitionIndices");
@@ -339,24 +321,24 @@ void HivePartitionedColumnData::ComputePartitionIndices(PartitionedColumnDataApp
 	const auto count = input.size();
 
 	input.Hash(group_by_columns, hashes_v);
-	hashes_v.Flatten(count);
+	hashes_v.Flatten();
 
 	for (idx_t col_idx = 0; col_idx < group_by_columns.size(); col_idx++) {
-		auto &group_by_col = input.data[group_by_columns[col_idx]];
-		GetHivePartitionValuesTypeSwitch(group_by_col, keys, col_idx, count);
+		const auto &group_by_col = input.data[group_by_columns[col_idx]];
+		GetHivePartitionValuesTypeSwitch(group_by_col, keys, col_idx);
 	}
 
 	const auto hashes = FlatVector::GetData<hash_t>(hashes_v);
-	const auto partition_indices = FlatVector::GetData<idx_t>(state.partition_indices);
+	auto partition_indices = FlatVector::Writer<idx_t>(state.partition_indices, count);
 	for (idx_t i = 0; i < count; i++) {
 		auto &key = keys[i];
 		key.hash = hashes[i];
 		auto lookup = local_partition_map.find(key);
 		if (lookup == local_partition_map.end()) {
 			idx_t new_partition_id = RegisterNewPartition(key, state);
-			partition_indices[i] = new_partition_id;
+			partition_indices.WriteValue(new_partition_id);
 		} else {
-			partition_indices[i] = lookup->second;
+			partition_indices.WriteValue(lookup->second);
 		}
 	}
 }

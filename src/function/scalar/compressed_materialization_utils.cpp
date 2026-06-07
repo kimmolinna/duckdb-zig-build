@@ -8,12 +8,11 @@ const vector<LogicalType> CMUtils::IntegralTypes() {
 
 const vector<LogicalType> CMUtils::StringTypes() {
 	return {LogicalType::UTINYINT, LogicalType::USMALLINT, LogicalType::UINTEGER, LogicalType::UBIGINT,
-	        LogicalType::HUGEINT};
+	        LogicalType::UHUGEINT};
 }
 
 // LCOV_EXCL_START
-unique_ptr<FunctionData> CMUtils::Bind(ClientContext &context, ScalarFunction &bound_function,
-                                       vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> CMUtils::Bind(BindScalarFunctionInput &input) {
 	throw BinderException("Compressed materialization functions are for internal use only!");
 }
 // LCOV_EXCL_STOP

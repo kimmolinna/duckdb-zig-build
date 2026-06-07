@@ -1,11 +1,6 @@
 #include "duckdb/parser/parsed_data/create_info.hpp"
 
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
-#include "duckdb/parser/parsed_data/create_schema_info.hpp"
-#include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "duckdb/parser/parsed_data/create_view_info.hpp"
-#include "duckdb/parser/parsed_data/create_sequence_info.hpp"
-#include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
 
@@ -18,6 +13,7 @@ void CreateInfo::CopyProperties(CreateInfo &other) const {
 	other.on_conflict = on_conflict;
 	other.temporary = temporary;
 	other.internal = internal;
+	other.extension_name = extension_name;
 	other.sql = sql;
 	other.dependencies = dependencies;
 	other.comment = comment;
@@ -26,6 +22,22 @@ void CreateInfo::CopyProperties(CreateInfo &other) const {
 
 unique_ptr<AlterInfo> CreateInfo::GetAlterInfo() const {
 	throw NotImplementedException("GetAlterInfo not implemented for this type");
+}
+
+string CreateInfo::GetCreatePrefix(const string &entry) const {
+	string prefix = "CREATE";
+	if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+		prefix += " OR REPLACE";
+	}
+	if (temporary) {
+		prefix += " TEMP";
+	}
+	prefix += " " + entry + " ";
+
+	if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+		prefix += " IF NOT EXISTS ";
+	}
+	return prefix;
 }
 
 } // namespace duckdb

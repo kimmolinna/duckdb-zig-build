@@ -2,7 +2,7 @@
 # description: Test compatibility of ART indexes for different duckdb versions
 # group: [storage]
 
-# data/storage/index_0-9-1.db was written with a 64-bit version of duckdb
+# data/storage/index_0-9-1.db was written with a 64-bit version of duckdb.
 require 64bit
 
 # The database is written with a vector size of 2048.
@@ -70,12 +70,12 @@ SELECT i FROM idx_tbl WHERE i = 11
 # load the data into a new database to make it mutable
 
 statement ok
-EXPORT DATABASE '__TEST_DIR__/export_index_db' (FORMAT CSV)
+EXPORT DATABASE '{TEST_DIR}/export_index_db' (FORMAT CSV)
 
-load __TEST_DIR__/test_art_import.db
+load {TEST_DIR}/test_art_import.db
 
 statement ok
-IMPORT DATABASE '__TEST_DIR__/export_index_db'
+IMPORT DATABASE '{TEST_DIR}/export_index_db'
 
 # first, perform the same checks
 
@@ -219,6 +219,14 @@ statement ok
 CHECKPOINT
 
 query I
-SELECT used_blocks < 2 FROM pragma_database_size();
+SELECT
+	CASE WHEN (
+		CASE WHEN get_block_size('test_art_import') = 16384
+		THEN used_blocks < 3
+		ELSE used_blocks < 2 END
+	)
+	THEN NULL
+	ELSE T END
+FROM pragma_database_size() T;
 ----
-1
+NULL

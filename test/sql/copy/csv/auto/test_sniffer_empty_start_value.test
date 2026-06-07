@@ -2,11 +2,8 @@
 # description: Test reading a value with empty spaces at the beginning
 # group: [auto]
 
-statement ok
-PRAGMA enable_verification
-
 query III
-from read_csv('data/csv/empty_space_start_value.csv')
+from read_csv('{DATA_DIR}/csv/empty_space_start_value.csv')
 ----
 1968	86	Greetings
 1970	17	Bloody Mama

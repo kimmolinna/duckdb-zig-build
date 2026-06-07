@@ -2,9 +2,6 @@
 # description: Test generated columns with the CHECK constraint
 # group: [virtual]
 
-statement ok
-PRAGMA enable_verification
-
 #Check constraint involving a generated column is not supported
 
 # Using a CHECK constraint that doesnt involve the generated column itself is fine
@@ -21,6 +18,7 @@ CREATE TABLE tbl (
 	amount_sold AS (price) CHECK (amount_sold > 5)
 );
 ----
+<REGEX>:.*Binder Error.*Constraints on generated columns.*
 
 # Also when used in this way
 statement error
@@ -30,6 +28,7 @@ CREATE TABLE tbl (
 	CHECK (amount_sold > price)
 );
 ----
+<REGEX>:.*Binder Error.*Constraints on generated columns.*
 
 statement ok
 CREATE TABLE chk (
@@ -45,3 +44,4 @@ INSERT INTO chk VALUES (6);
 statement error
 INSERT INTO chk VALUES (3);
 ----
+<REGEX>:.*Constraint Error.*constraint failed.*

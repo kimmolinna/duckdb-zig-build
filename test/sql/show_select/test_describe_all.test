@@ -2,11 +2,6 @@
 # description: Test describe all
 # group: [show_select]
 
-require noforcestorage
-
-statement ok
-PRAGMA enable_verification
-
 statement ok
 CREATE TABLE integers(i INTEGER, j INTEGER, a INTEGER);
 
@@ -18,12 +13,13 @@ DESCRIBE
 ----
 memory	main	integers	[i, j, a]	[INTEGER, INTEGER, INTEGER]	false
 
-# issue #6393
+# Issue 6393
+
 statement ok
 DROP TABLE integers
 
 statement ok
-create table t(plant text, dt date, mwh bigint);
+CREATE TABLE t(plant TEXT, dt DATE, mwh BIGINT);
 
 query TTTTTT
 DESCRIBE;

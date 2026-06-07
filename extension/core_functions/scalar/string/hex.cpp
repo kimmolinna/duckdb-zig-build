@@ -66,12 +66,12 @@ static void WriteHugeIntBinBytes(T x, char *&output, idx_t buffer_size) {
 
 struct HexStrOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto data = input.GetData();
 		auto size = input.GetSize();
 
 		// Allocate empty space
-		auto target = StringVector::EmptyString(result, size * 2);
+		auto target = heap.EmptyString(size * 2);
 		auto output = target.GetDataWriteable();
 
 		for (idx_t i = 0; i < size; ++i) {
@@ -88,8 +88,7 @@ struct HexStrOperator {
 
 struct HexIntegralOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
-
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto num_leading_zero = CountZeros<uint64_t>::Leading(static_cast<uint64_t>(input));
 		idx_t num_bits_to_check = 64 - num_leading_zero;
 		D_ASSERT(num_bits_to_check <= sizeof(INPUT_TYPE) * 8);
@@ -98,7 +97,7 @@ struct HexIntegralOperator {
 
 		// Special case: All bits are zero
 		if (buffer_size == 0) {
-			auto target = StringVector::EmptyString(result, 1);
+			auto target = heap.EmptyString(1);
 			auto output = target.GetDataWriteable();
 			*output = '0';
 			target.Finalize();
@@ -106,7 +105,7 @@ struct HexIntegralOperator {
 		}
 
 		D_ASSERT(buffer_size > 0);
-		auto target = StringVector::EmptyString(result, buffer_size);
+		auto target = heap.EmptyString(buffer_size);
 		auto output = target.GetDataWriteable();
 
 		WriteHexBytes(static_cast<uint64_t>(input), output, buffer_size);
@@ -118,14 +117,13 @@ struct HexIntegralOperator {
 
 struct HexHugeIntOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
-
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		idx_t num_leading_zero = CountZeros<hugeint_t>::Leading(UnsafeNumericCast<hugeint_t>(input));
 		idx_t buffer_size = sizeof(INPUT_TYPE) * 2 - (num_leading_zero / 4);
 
 		// Special case: All bits are zero
 		if (buffer_size == 0) {
-			auto target = StringVector::EmptyString(result, 1);
+			auto target = heap.EmptyString(1);
 			auto output = target.GetDataWriteable();
 			*output = '0';
 			target.Finalize();
@@ -133,7 +131,7 @@ struct HexHugeIntOperator {
 		}
 
 		D_ASSERT(buffer_size > 0);
-		auto target = StringVector::EmptyString(result, buffer_size);
+		auto target = heap.EmptyString(buffer_size);
 		auto output = target.GetDataWriteable();
 
 		WriteHugeIntHexBytes<hugeint_t>(input, output, buffer_size);
@@ -145,14 +143,13 @@ struct HexHugeIntOperator {
 
 struct HexUhugeIntOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
-
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		idx_t num_leading_zero = CountZeros<uhugeint_t>::Leading(UnsafeNumericCast<uhugeint_t>(input));
 		idx_t buffer_size = sizeof(INPUT_TYPE) * 2 - (num_leading_zero / 4);
 
 		// Special case: All bits are zero
 		if (buffer_size == 0) {
-			auto target = StringVector::EmptyString(result, 1);
+			auto target = heap.EmptyString(1);
 			auto output = target.GetDataWriteable();
 			*output = '0';
 			target.Finalize();
@@ -160,7 +157,7 @@ struct HexUhugeIntOperator {
 		}
 
 		D_ASSERT(buffer_size > 0);
-		auto target = StringVector::EmptyString(result, buffer_size);
+		auto target = heap.EmptyString(buffer_size);
 		auto output = target.GetDataWriteable();
 
 		WriteHugeIntHexBytes<uhugeint_t>(input, output, buffer_size);
@@ -173,19 +170,18 @@ struct HexUhugeIntOperator {
 template <class INPUT, class OP>
 static void ToHexFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	D_ASSERT(args.ColumnCount() == 1);
-	auto &input = args.data[0];
-	idx_t count = args.size();
-	UnaryExecutor::ExecuteString<INPUT, string_t, OP>(input, result, count);
+	const auto &input = args.data[0];
+	UnaryExecutor::ExecuteString<INPUT, string_t, OP>(input, result);
 }
 
 struct BinaryStrOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto data = input.GetData();
 		auto size = input.GetSize();
 
 		// Allocate empty space
-		auto target = StringVector::EmptyString(result, size * 8);
+		auto target = heap.EmptyString(size * 8);
 		auto output = target.GetDataWriteable();
 
 		for (idx_t i = 0; i < size; ++i) {
@@ -203,8 +199,7 @@ struct BinaryStrOperator {
 
 struct BinaryIntegralOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
-
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto num_leading_zero = CountZeros<uint64_t>::Leading(static_cast<uint64_t>(input));
 		idx_t num_bits_to_check = 64 - num_leading_zero;
 		D_ASSERT(num_bits_to_check <= sizeof(INPUT_TYPE) * 8);
@@ -213,7 +208,7 @@ struct BinaryIntegralOperator {
 
 		// Special case: All bits are zero
 		if (buffer_size == 0) {
-			auto target = StringVector::EmptyString(result, 1);
+			auto target = heap.EmptyString(1);
 			auto output = target.GetDataWriteable();
 			*output = '0';
 			target.Finalize();
@@ -221,7 +216,7 @@ struct BinaryIntegralOperator {
 		}
 
 		D_ASSERT(buffer_size > 0);
-		auto target = StringVector::EmptyString(result, buffer_size);
+		auto target = heap.EmptyString(buffer_size);
 		auto output = target.GetDataWriteable();
 
 		WriteBinBytes(static_cast<uint64_t>(input), output, buffer_size);
@@ -233,20 +228,20 @@ struct BinaryIntegralOperator {
 
 struct BinaryHugeIntOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto num_leading_zero = CountZeros<hugeint_t>::Leading(UnsafeNumericCast<hugeint_t>(input));
 		idx_t buffer_size = sizeof(INPUT_TYPE) * 8 - num_leading_zero;
 
 		// Special case: All bits are zero
 		if (buffer_size == 0) {
-			auto target = StringVector::EmptyString(result, 1);
+			auto target = heap.EmptyString(1);
 			auto output = target.GetDataWriteable();
 			*output = '0';
 			target.Finalize();
 			return target;
 		}
 
-		auto target = StringVector::EmptyString(result, buffer_size);
+		auto target = heap.EmptyString(buffer_size);
 		auto output = target.GetDataWriteable();
 
 		WriteHugeIntBinBytes<hugeint_t>(input, output, buffer_size);
@@ -258,20 +253,20 @@ struct BinaryHugeIntOperator {
 
 struct BinaryUhugeIntOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto num_leading_zero = CountZeros<hugeint_t>::Leading(UnsafeNumericCast<uhugeint_t>(input));
 		idx_t buffer_size = sizeof(INPUT_TYPE) * 8 - num_leading_zero;
 
 		// Special case: All bits are zero
 		if (buffer_size == 0) {
-			auto target = StringVector::EmptyString(result, 1);
+			auto target = heap.EmptyString(1);
 			auto output = target.GetDataWriteable();
 			*output = '0';
 			target.Finalize();
 			return target;
 		}
 
-		auto target = StringVector::EmptyString(result, buffer_size);
+		auto target = heap.EmptyString(buffer_size);
 		auto output = target.GetDataWriteable();
 
 		WriteHugeIntBinBytes<uhugeint_t>(input, output, buffer_size);
@@ -283,7 +278,7 @@ struct BinaryUhugeIntOperator {
 
 struct FromHexOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto data = input.GetData();
 		auto size = input.GetSize();
 
@@ -295,7 +290,7 @@ struct FromHexOperator {
 		auto buffer_size = (size + 1) / 2;
 
 		// Allocate empty space
-		auto target = StringVector::EmptyString(result, buffer_size);
+		auto target = heap.EmptyString(buffer_size);
 		auto output = target.GetDataWriteable();
 
 		// Treated as a single byte
@@ -320,7 +315,7 @@ struct FromHexOperator {
 
 struct FromBinaryOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto data = input.GetData();
 		auto size = input.GetSize();
 
@@ -332,7 +327,7 @@ struct FromBinaryOperator {
 		auto buffer_size = (size + 7) / 8;
 
 		// Allocate empty space
-		auto target = StringVector::EmptyString(result, buffer_size);
+		auto target = heap.EmptyString(buffer_size);
 		auto output = target.GetDataWriteable();
 
 		// Treated as a single byte
@@ -365,27 +360,22 @@ struct FromBinaryOperator {
 template <class INPUT, class OP>
 static void ToBinaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	D_ASSERT(args.ColumnCount() == 1);
-	auto &input = args.data[0];
-	idx_t count = args.size();
-	UnaryExecutor::ExecuteString<INPUT, string_t, OP>(input, result, count);
+	const auto &input = args.data[0];
+	UnaryExecutor::ExecuteString<INPUT, string_t, OP>(input, result);
 }
 
 static void FromBinaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	D_ASSERT(args.ColumnCount() == 1);
 	D_ASSERT(args.data[0].GetType().InternalType() == PhysicalType::VARCHAR);
-	auto &input = args.data[0];
-	idx_t count = args.size();
-
-	UnaryExecutor::ExecuteString<string_t, string_t, FromBinaryOperator>(input, result, count);
+	const auto &input = args.data[0];
+	UnaryExecutor::ExecuteString<string_t, string_t, FromBinaryOperator>(input, result);
 }
 
 static void FromHexFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	D_ASSERT(args.ColumnCount() == 1);
 	D_ASSERT(args.data[0].GetType().InternalType() == PhysicalType::VARCHAR);
-	auto &input = args.data[0];
-	idx_t count = args.size();
-
-	UnaryExecutor::ExecuteString<string_t, string_t, FromHexOperator>(input, result, count);
+	const auto &input = args.data[0];
+	UnaryExecutor::ExecuteString<string_t, string_t, FromHexOperator>(input, result);
 }
 
 ScalarFunctionSet HexFun::GetFunctions() {
@@ -393,7 +383,7 @@ ScalarFunctionSet HexFun::GetFunctions() {
 	to_hex.AddFunction(
 	    ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, ToHexFunction<string_t, HexStrOperator>));
 	to_hex.AddFunction(
-	    ScalarFunction({LogicalType::VARINT}, LogicalType::VARCHAR, ToHexFunction<string_t, HexStrOperator>));
+	    ScalarFunction({LogicalType::BIGNUM}, LogicalType::VARCHAR, ToHexFunction<string_t, HexStrOperator>));
 	to_hex.AddFunction(
 	    ScalarFunction({LogicalType::BLOB}, LogicalType::VARCHAR, ToHexFunction<string_t, HexStrOperator>));
 	to_hex.AddFunction(
@@ -409,7 +399,7 @@ ScalarFunctionSet HexFun::GetFunctions() {
 
 ScalarFunction UnhexFun::GetFunction() {
 	ScalarFunction function({LogicalType::VARCHAR}, LogicalType::BLOB, FromHexFunction);
-	BaseScalarFunction::SetReturnsError(function);
+	function.SetFallible();
 	return function;
 }
 
@@ -419,7 +409,7 @@ ScalarFunctionSet BinFun::GetFunctions() {
 	to_binary.AddFunction(
 	    ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, ToBinaryFunction<string_t, BinaryStrOperator>));
 	to_binary.AddFunction(
-	    ScalarFunction({LogicalType::VARINT}, LogicalType::VARCHAR, ToBinaryFunction<string_t, BinaryStrOperator>));
+	    ScalarFunction({LogicalType::BIGNUM}, LogicalType::VARCHAR, ToBinaryFunction<string_t, BinaryStrOperator>));
 	to_binary.AddFunction(ScalarFunction({LogicalType::UBIGINT}, LogicalType::VARCHAR,
 	                                     ToBinaryFunction<uint64_t, BinaryIntegralOperator>));
 	to_binary.AddFunction(
@@ -433,7 +423,7 @@ ScalarFunctionSet BinFun::GetFunctions() {
 
 ScalarFunction UnbinFun::GetFunction() {
 	ScalarFunction function({LogicalType::VARCHAR}, LogicalType::BLOB, FromBinaryFunction);
-	BaseScalarFunction::SetReturnsError(function);
+	function.SetFallible();
 	return function;
 }
 

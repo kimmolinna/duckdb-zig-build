@@ -2,9 +2,6 @@
 # description: Test unsigned auto cast
 # group: [unsigned]
 
-statement ok
-PRAGMA enable_verification
-
 ## test auto cast of unsigned
 #query I
 #SELECT 100000000::INTEGER + 100::UTINYINT
@@ -111,6 +108,7 @@ SELECT '255'::UTINYINT;
 statement error
 SELECT '256'::UTINYINT;
 ----
+<REGEX>:Conversion Error.*Could not convert string.*
 
 query I
 SELECT '255'::USMALLINT;
@@ -120,6 +118,7 @@ SELECT '255'::USMALLINT;
 statement error
 SELECT '65536'::USMALLINT;
 ----
+<REGEX>:Conversion Error.*Could not convert string.*
 
 query I
 SELECT '65535'::UINTEGER;
@@ -129,6 +128,7 @@ SELECT '65535'::UINTEGER;
 statement error
 SELECT '4294967296'::UINTEGER;
 ----
+<REGEX>:Conversion Error.*Could not convert string.*
 
 query I
 SELECT '4294967295'::UBIGINT;
@@ -138,6 +138,7 @@ SELECT '4294967295'::UBIGINT;
 statement error
 SELECT '18446744073709551616'::UBIGINT;
 ----
+<REGEX>:Conversion Error.*Could not convert string.*
 
 query I
 SELECT '18446744073709551615'::UBIGINT;
@@ -154,6 +155,7 @@ SELECT (100::UTINYINT)::DECIMAL(3,0);
 statement error
 SELECT (100::UTINYINT)::DECIMAL(2,0);
 ----
+<REGEX>:Conversion Error.*Could not cast value.*
 
 query I
 SELECT 100::UTINYINT * 100::DECIMAL(3,0);
@@ -168,6 +170,7 @@ SELECT (100::USMALLINT)::DECIMAL(3,0);
 statement error
 SELECT (100::USMALLINT)::DECIMAL(2,0);
 ----
+<REGEX>:Conversion Error.*Could not cast value.*
 
 query I
 SELECT 100::USMALLINT * 100::DECIMAL(3,0);
@@ -183,6 +186,7 @@ SELECT (100::UINTEGER)::DECIMAL(3,0);
 statement error
 SELECT (100::UINTEGER)::DECIMAL(2,0);
 ----
+<REGEX>:Conversion Error.*Could not cast value.*
 
 query I
 SELECT 100::UINTEGER * 100::DECIMAL(3,0);
@@ -197,6 +201,7 @@ SELECT (100::UBIGINT)::DECIMAL(3,0);
 statement error
 SELECT (100::UBIGINT)::DECIMAL(2,0);
 ----
+<REGEX>:Conversion Error.*Could not cast value.*
 
 query I
 SELECT 100::UBIGINT * 100::DECIMAL(3,0);

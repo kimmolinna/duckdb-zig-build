@@ -1,5 +1,7 @@
 #include "duckdb/execution/operator/csv_scanner/csv_schema.hpp"
 
+#include "duckdb/common/array.hpp"
+
 namespace duckdb {
 
 struct TypeIdxPair {
@@ -25,17 +27,26 @@ bool CSVSchema::CanWeCastIt(LogicalTypeId source, LogicalTypeId destination) {
 	case LogicalTypeId::TINYINT:
 		return destination == LogicalTypeId::SMALLINT || destination == LogicalTypeId::INTEGER ||
 		       destination == LogicalTypeId::BIGINT || destination == LogicalTypeId::DECIMAL ||
+		       destination == LogicalTypeId::HUGEINT || destination == LogicalTypeId::BIGNUM ||
 		       destination == LogicalTypeId::FLOAT || destination == LogicalTypeId::DOUBLE;
 	case LogicalTypeId::SMALLINT:
 		return destination == LogicalTypeId::INTEGER || destination == LogicalTypeId::BIGINT ||
-		       destination == LogicalTypeId::DECIMAL || destination == LogicalTypeId::FLOAT ||
+		       destination == LogicalTypeId::DECIMAL || destination == LogicalTypeId::HUGEINT ||
+		       destination == LogicalTypeId::BIGNUM || destination == LogicalTypeId::FLOAT ||
 		       destination == LogicalTypeId::DOUBLE;
 	case LogicalTypeId::INTEGER:
 		return destination == LogicalTypeId::BIGINT || destination == LogicalTypeId::DECIMAL ||
+		       destination == LogicalTypeId::HUGEINT || destination == LogicalTypeId::BIGNUM ||
 		       destination == LogicalTypeId::FLOAT || destination == LogicalTypeId::DOUBLE;
 	case LogicalTypeId::BIGINT:
-		return destination == LogicalTypeId::DECIMAL || destination == LogicalTypeId::FLOAT ||
+		return destination == LogicalTypeId::DECIMAL || destination == LogicalTypeId::HUGEINT ||
+		       destination == LogicalTypeId::BIGNUM || destination == LogicalTypeId::FLOAT ||
 		       destination == LogicalTypeId::DOUBLE;
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UHUGEINT:
+		return destination == LogicalTypeId::BIGNUM || destination == LogicalTypeId::DOUBLE;
+	case LogicalTypeId::BIGNUM:
+		return destination == LogicalTypeId::DOUBLE;
 	case LogicalTypeId::FLOAT:
 		return destination == LogicalTypeId::DOUBLE;
 	default:
@@ -45,8 +56,9 @@ bool CSVSchema::CanWeCastIt(LogicalTypeId source, LogicalTypeId destination) {
 
 void CSVSchema::MergeSchemas(CSVSchema &other, bool null_padding) {
 	// TODO: We could also merge names, maybe by giving preference to non-generated names?
-	const vector<LogicalType> candidates_by_specificity = {LogicalType::BOOLEAN, LogicalType::BIGINT,
-	                                                       LogicalType::DOUBLE, LogicalType::VARCHAR};
+	const array<LogicalType, 6> candidates_by_specificity = {LogicalType::BOOLEAN, LogicalType::BIGINT,
+	                                                         LogicalType::HUGEINT, LogicalType::BIGNUM,
+	                                                         LogicalType::DOUBLE,  LogicalType::VARCHAR};
 	for (idx_t i = 0; i < columns.size() && i < other.columns.size(); i++) {
 		auto this_type = columns[i].type.id();
 		auto other_type = other.columns[i].type.id();
@@ -76,8 +88,8 @@ void CSVSchema::MergeSchemas(CSVSchema &other, bool null_padding) {
 	}
 }
 
-CSVSchema::CSVSchema(vector<string> &names, vector<LogicalType> &types, const string &file_path, idx_t rows_read_p,
-                     const bool empty_p)
+CSVSchema::CSVSchema(const vector<string> &names, const vector<LogicalType> &types, const string &file_path,
+                     idx_t rows_read_p, const bool empty_p)
     : rows_read(rows_read_p), empty(empty_p) {
 	Initialize(names, types, file_path);
 }
@@ -90,8 +102,8 @@ void CSVSchema::Initialize(const vector<string> &names, const vector<LogicalType
 	D_ASSERT(names.size() == types.size() && !names.empty());
 	for (idx_t i = 0; i < names.size(); i++) {
 		// Populate our little schema
-		auto name = names.at(i);
-		auto type = types.at(i);
+		const auto &name = names.at(i);
+		const auto &type = types.at(i);
 		columns.push_back({name, type});
 		name_idx_map[names[i]] = i;
 	}
@@ -111,6 +123,14 @@ vector<LogicalType> CSVSchema::GetTypes() const {
 		types.push_back(column.type);
 	}
 	return types;
+}
+
+void CSVSchema::ReplaceNullWithVarchar() {
+	for (auto &column : columns) {
+		if (column.type.id() == LogicalTypeId::SQLNULL) {
+			column.type = LogicalType::VARCHAR;
+		}
+	}
 }
 
 bool CSVSchema::Empty() const {
@@ -207,7 +227,12 @@ bool CSVSchema::SchemasMatch(string &error_message, SnifferResult &sniffer_resul
 	}
 
 	// Lets suggest some potential fixes
-	error << "Potential Fix: Since your schema has a mismatch, consider setting union_by_name=true.";
+	error << "Potential Fixes "
+	      << "\n";
+	error << "* Consider setting union_by_name=true."
+	      << "\n";
+	error << "* Consider setting files_to_sniff to a higher value (e.g., files_to_sniff = -1)"
+	      << "\n";
 	if (!match) {
 		error_message = error.str();
 	}

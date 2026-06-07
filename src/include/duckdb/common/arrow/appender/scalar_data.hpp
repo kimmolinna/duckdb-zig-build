@@ -1,3 +1,11 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// duckdb/common/arrow/appender/scalar_data.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
 #pragma once
 
 #include "duckdb/common/arrow/appender/append_data.hpp"
@@ -63,9 +71,10 @@ struct ArrowUUIDBlobConverter {
 	template <class TGT, class SRC>
 	static TGT Operation(hugeint_t input) {
 		// Turn into big-end
-		auto upper = BSwap(input.lower);
+		auto upper = BSwapIfLE(input.lower);
 		// flip Upper MSD
-		auto lower = BSwap(static_cast<int64_t>(static_cast<uint64_t>(input.upper) ^ (static_cast<uint64_t>(1) << 63)));
+		auto lower =
+		    BSwapIfLE(static_cast<int64_t>(static_cast<uint64_t>(input.upper) ^ (static_cast<uint64_t>(1) << 63)));
 		return {static_cast<int64_t>(upper), static_cast<uint64_t>(lower)};
 	}
 
@@ -80,15 +89,15 @@ struct ArrowUUIDBlobConverter {
 
 template <class TGT, class SRC = TGT, class OP = ArrowScalarConverter>
 struct ArrowScalarBaseData {
-	static void Append(ArrowAppendData &append_data, Vector &input, idx_t from, idx_t to, idx_t input_size) {
+	static void Append(ArrowAppendData &append_data, const Vector &input, idx_t from, idx_t to, idx_t input_size) {
 		D_ASSERT(to >= from);
 		idx_t size = to - from;
 		D_ASSERT(size <= input_size);
 		UnifiedVectorFormat format;
-		input.ToUnifiedFormat(input_size, format);
+		input.ToUnifiedFormat(format);
 
 		// append the validity mask
-		AppendValidity(append_data, format, from, to);
+		append_data.AppendValidity(format, from, to);
 
 		// append the main data
 		auto &main_buffer = append_data.GetMainBuffer();

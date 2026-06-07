@@ -3,17 +3,21 @@
 
 namespace duckdb {
 
+namespace {
+
 struct EscapeOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE &input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto escaped_pattern = RE2::QuoteMeta(input.GetString());
-		return StringVector::AddString(result, escaped_pattern);
+		return heap.AddString(escaped_pattern);
 	}
 };
 
-static void RegexpEscapeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	UnaryExecutor::ExecuteString<string_t, string_t, EscapeOperator>(args.data[0], result, args.size());
+void RegexpEscapeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	UnaryExecutor::ExecuteString<string_t, string_t, EscapeOperator>(args.data[0], result);
 }
+
+} // namespace
 
 ScalarFunction RegexpEscapeFun::GetFunction() {
 	return ScalarFunction("regexp_escape", {LogicalType::VARCHAR}, LogicalType::VARCHAR, RegexpEscapeFunction);

@@ -7,17 +7,17 @@
 #include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/optimizer/rule/ordered_aggregate_optimizer.hpp"
+#include "duckdb/main/settings.hpp"
 
 namespace duckdb {
 
-unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalDistinct &op) {
+PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalDistinct &op) {
 	D_ASSERT(op.children.size() == 1);
-	auto child = CreatePlan(*op.children[0]);
+	reference<PhysicalOperator> child = CreatePlan(*op.children[0]);
 	auto &distinct_targets = op.distinct_targets;
-	D_ASSERT(child);
 	D_ASSERT(!distinct_targets.empty());
 
-	auto &types = child->GetTypes();
+	auto &types = child.get().GetTypes();
 	vector<unique_ptr<Expression>> groups, aggregates, projections;
 	idx_t group_count = distinct_targets.size();
 	unordered_map<idx_t, idx_t> group_by_references;
@@ -27,9 +27,9 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalDistinct &
 		auto &target = distinct_targets[i];
 		if (target->GetExpressionType() == ExpressionType::BOUND_REF) {
 			auto &bound_ref = target->Cast<BoundReferenceExpression>();
-			group_by_references[bound_ref.index] = i;
+			group_by_references[bound_ref.Index()] = i;
 		}
-		aggregate_types.push_back(target->return_type);
+		aggregate_types.push_back(target->GetReturnType());
 		groups.push_back(std::move(target));
 	}
 	bool requires_projection = false;
@@ -62,13 +62,14 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalDistinct &
 			auto first_aggregate =
 			    function_binder.BindAggregateFunction(FirstFunctionGetter::GetFunction(logical_type),
 			                                          std::move(first_children), nullptr, AggregateType::NON_DISTINCT);
-			first_aggregate->order_bys = op.order_by ? op.order_by->Copy() : nullptr;
+			first_aggregate->GetOrderBysMutable() = op.order_by ? op.order_by->Copy() : nullptr;
 
-			if (ClientConfig::GetConfig(context).enable_optimizer) {
+			if (Settings::Get<EnableOptimizerSetting>(context)) {
 				bool changes_made = false;
-				auto new_expr = OrderedAggregateOptimizer::Apply(context, *first_aggregate, groups, changes_made);
+				auto new_expr =
+				    OrderedAggregateOptimizer::Apply(context, *first_aggregate, groups, nullptr, changes_made);
 				if (new_expr) {
-					D_ASSERT(new_expr->return_type == first_aggregate->return_type);
+					D_ASSERT(new_expr->GetReturnType() == first_aggregate->GetReturnType());
 					D_ASSERT(new_expr->GetExpressionType() == ExpressionType::BOUND_AGGREGATE);
 					first_aggregate = unique_ptr_cast<Expression, BoundAggregateExpression>(std::move(new_expr));
 				}
@@ -82,20 +83,20 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalDistinct &
 		}
 	}
 
-	child = ExtractAggregateExpressions(std::move(child), aggregates, groups);
+	child = ExtractAggregateExpressions(child, aggregates, groups, nullptr);
 
 	// we add a physical hash aggregation in the plan to select the distinct groups
-	auto groupby = make_uniq<PhysicalHashAggregate>(context, aggregate_types, std::move(aggregates), std::move(groups),
-	                                                child->estimated_cardinality);
-	groupby->children.push_back(std::move(child));
+	auto &group_by = Make<PhysicalHashAggregate>(context, aggregate_types, std::move(aggregates), std::move(groups),
+	                                             child.get().estimated_cardinality);
+	group_by.children.push_back(child);
 	if (!requires_projection) {
-		return std::move(groupby);
+		return group_by;
 	}
 
 	// we add a physical projection on top of the aggregation to project all members in the select list
-	auto aggr_projection = make_uniq<PhysicalProjection>(types, std::move(projections), groupby->estimated_cardinality);
-	aggr_projection->children.push_back(std::move(groupby));
-	return std::move(aggr_projection);
+	auto &proj = Make<PhysicalProjection>(types, std::move(projections), group_by.estimated_cardinality);
+	proj.children.push_back(group_by);
+	return proj;
 }
 
 } // namespace duckdb

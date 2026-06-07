@@ -143,8 +143,8 @@ bool Time::TryConvertTime(const char *buf, idx_t len, idx_t &pos, dtime_t &resul
 		if (!strict) {
 			// last chance, check if we can parse as timestamp
 			timestamp_t timestamp;
-			if (Timestamp::TryConvertTimestamp(buf, len, timestamp, nanos) == TimestampCastResult::SUCCESS) {
-				if (!Timestamp::IsFinite(timestamp)) {
+			if (Timestamp::TryConvertTimestamp(buf, len, timestamp, false, nanos) == TimestampCastResult::SUCCESS) {
+				if (!timestamp.IsFinite()) {
 					return false;
 				}
 				result = Timestamp::GetTime(timestamp);
@@ -164,14 +164,19 @@ bool Time::TryConvertTimeTZ(const char *buf, idx_t len, idx_t &pos, dtime_tz_t &
 		if (!strict) {
 			// last chance, check if we can parse as timestamp
 			timestamp_t timestamp;
-			if (Timestamp::TryConvertTimestamp(buf, len, timestamp, nanos) == TimestampCastResult::SUCCESS) {
-				if (!Timestamp::IsFinite(timestamp)) {
+			if (Timestamp::TryConvertTimestamp(buf, len, timestamp, true, nanos) == TimestampCastResult::SUCCESS) {
+				if (!timestamp.IsFinite()) {
 					return false;
 				}
 				result = dtime_tz_t(Timestamp::GetTime(timestamp), 0);
 				return true;
 			}
 		}
+		return false;
+	}
+
+	//	Interval parsing accepts larger hour counts, but we must limit ourselves to <= 24:00:00
+	if (time_part.micros > Interval::MICROS_PER_DAY) {
 		return false;
 	}
 

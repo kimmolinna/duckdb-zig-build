@@ -2,11 +2,6 @@
 # description: Issue #7660 - USE databases causes export database to produce duplicate data
 # group: [attach]
 
-require noforcestorage
-
-statement ok
-PRAGMA enable_verification
-
 statement ok
 attach ':memory:' as test;
 
@@ -22,7 +17,7 @@ FROM test.tbl1
 1
 
 statement ok
-export database '__TEST_DIR__/test_issue_7660';
+export database '{TEST_DIR}/test_issue_7660';
 
 statement ok
 USE memory
@@ -31,7 +26,7 @@ statement ok
 DETACH test
 
 statement ok
-import database '__TEST_DIR__/test_issue_7660'
+import database '{TEST_DIR}/test_issue_7660'
 
 query I
 FROM tbl1

@@ -1,9 +1,12 @@
 #include "duckdb/optimizer/filter_pushdown.hpp"
+#include "duckdb/optimizer/in_clause_rewriter.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_parameter_expression.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_empty_result.hpp"
 
 namespace duckdb {
 unique_ptr<LogicalOperator> FilterPushdown::PushdownGet(unique_ptr<LogicalOperator> op) {
@@ -44,17 +47,62 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownGet(unique_ptr<LogicalOperat
 		}
 	}
 
-	if (!get.table_filters.filters.empty() || !get.function.filter_pushdown) {
+	if (get.table_filters.HasFilters() || !get.function.filter_pushdown) {
 		// the table function does not support filter pushdown: push a LogicalFilter on top
 		return FinishPushdown(std::move(op));
 	}
-	PushFilters();
+	if (PushFilters() == FilterResult::UNSATISFIABLE) {
+		return make_uniq<LogicalEmptyResult>(std::move(op));
+	}
 
+	auto &column_ids = get.GetColumnIds();
 	//! We generate the table filters that will be executed during the table scan
-	//! Right now this only executes simple AND filters
-	get.table_filters = combiner.GenerateTableScanFilters(get.GetColumnIds());
+	vector<FilterPushdownResult> pushdown_results;
+	get.table_filters = combiner.GenerateTableScanFilters(column_ids, pushdown_results);
 
 	GenerateFilters();
+
+	for (idx_t i = pushdown_results.size(); i < filters.size(); ++i) {
+		// any generated filters have not been pushed down yet
+		pushdown_results.push_back(FilterPushdownResult::NO_PUSHDOWN);
+	}
+	// for any filters we did not manage to push into specialized table filters - try to push them as a generic
+	// expression
+	for (idx_t i = 0; i < filters.size(); ++i) {
+		// get the previous pushdown result
+		auto pushdown_result = pushdown_results[i];
+		if (pushdown_result != FilterPushdownResult::NO_PUSHDOWN) {
+			// this has already been (partially) pushed down - skip
+			continue;
+		}
+		auto &expr = *filters[i]->filter;
+		if (expr.IsVolatile()) {
+			continue;
+		}
+		// IN with enough values benefits from a hash join and is handled by InClauseRewriter - skip pushdown.
+		// Also skip throwing IN expressions: scan pushdown loses short-circuit evaluation semantics.
+		if (expr.GetExpressionType() == ExpressionType::COMPARE_IN) {
+			if (expr.CanThrow()) {
+				continue;
+			}
+			auto &in_expr = expr.Cast<BoundOperatorExpression>();
+			if (!in_expr.GetChildren().empty() &&
+			    in_expr.GetChildren()[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    in_expr.GetChildren().size() - 1 >= InClauseRewriter::IN_CLAUSE_REWRITE_THRESHOLD) {
+				continue;
+			}
+		}
+		// Allow pushing down filters that can throw only if there is a single expression
+		if (expr.CanThrow() && filters.size() > 1) {
+			continue;
+		}
+		pushdown_result = combiner.TryPushdownGenericExpression(get, expr);
+		if (pushdown_result == FilterPushdownResult::PUSHED_DOWN_FULLY) {
+			filters.erase_at(i);
+			pushdown_results.erase_at(i);
+			i--;
+		}
+	}
 
 	//! Now we try to pushdown the remaining filters to perform zonemap checking
 	return FinishPushdown(std::move(op));

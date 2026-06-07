@@ -3,11 +3,12 @@
 
 namespace duckdb {
 
+namespace {
 struct StatsBindData : public FunctionData {
-	explicit StatsBindData(string stats_p = string()) : stats(std::move(stats_p)) {
+	explicit StatsBindData(Value stats_p = Value(LogicalType::VARIANT())) : stats(std::move(stats_p)) {
 	}
 
-	string stats;
+	Value stats;
 
 public:
 	unique_ptr<FunctionData> Copy() const override {
@@ -16,38 +17,34 @@ public:
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<StatsBindData>();
-		return stats == other.stats;
+		return Value::NotDistinctFrom(stats, other.stats);
 	}
 };
 
-static void StatsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+void StatsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &info = func_expr.bind_info->Cast<StatsBindData>();
-	if (info.stats.empty()) {
-		info.stats = "No statistics";
-	}
-	Value v(info.stats);
-	result.Reference(v);
+	auto &info = func_expr.BindInfo()->Cast<StatsBindData>();
+	result.Reference(info.stats, count_t(args.size()));
 }
 
-unique_ptr<FunctionData> StatsBind(ClientContext &context, ScalarFunction &bound_function,
-                                   vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> StatsBind(BindScalarFunctionInput &input) {
 	return make_uniq<StatsBindData>();
 }
 
-static unique_ptr<BaseStatistics> StatsPropagateStats(ClientContext &context, FunctionStatisticsInput &input) {
+unique_ptr<BaseStatistics> StatsPropagateStats(ClientContext &context, FunctionStatisticsInput &input) {
 	auto &child_stats = input.child_stats;
 	auto &bind_data = input.bind_data;
 	auto &info = bind_data->Cast<StatsBindData>();
-	info.stats = child_stats[0].ToString();
+	info.stats = child_stats[0].ToStruct().CastAs(context, LogicalType::VARIANT());
 	return nullptr;
 }
 
+} // namespace
+
 ScalarFunction StatsFun::GetFunction() {
-	ScalarFunction stats({LogicalType::ANY}, LogicalType::VARCHAR, StatsFunction, StatsBind, nullptr,
-	                     StatsPropagateStats);
-	stats.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	stats.stability = FunctionStability::VOLATILE;
+	ScalarFunction stats({LogicalType::ANY}, LogicalType::VARIANT(), StatsFunction, StatsBind, StatsPropagateStats);
+	stats.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	stats.SetStability(FunctionStability::VOLATILE);
 	return stats;
 }
 

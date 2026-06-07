@@ -1,32 +1,37 @@
 #include "duckdb/parser/parser.hpp"
 
-#include "duckdb/parser/expression/cast_expression.hpp"
+#include "duckdb/main/extension_callback_manager.hpp"
 #include "duckdb/parser/group_by_node.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parser_extension.hpp"
-#include "duckdb/parser/query_error_context.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/extension_statement.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/statement/update_statement.hpp"
+#include "duckdb/parser/query_node/update_query_node.hpp"
 #include "duckdb/parser/tableref/expressionlistref.hpp"
-#include "duckdb/parser/transformer.hpp"
-#include "parser/parser.hpp"
-#include "postgres_parser.hpp"
+#include "duckdb/parser/peg/transformer/peg_transformer.hpp"
+#include "duckdb/parser/peg/tokenizer/parser_tokenizer.hpp"
+#include "duckdb/parser/peg/tokenizer/highlight_tokenizer.hpp"
+#include "utf8proc_wrapper.hpp"
 
 namespace duckdb {
 
 Parser::Parser(ParserOptions options_p) : options(options_p) {
 }
 
-struct UnicodeSpace {
-	UnicodeSpace(idx_t pos, idx_t bytes) : pos(pos), bytes(bytes) {
-	}
+Parser::~Parser() = default;
 
-	idx_t pos;
-	idx_t bytes;
-};
+ParserCache &Parser::GetCache() {
+	if (options.parser_cache) {
+		return *options.parser_cache;
+	}
+	if (!local_cache) {
+		local_cache = make_uniq<ParserCache>();
+	}
+	return *local_cache;
+}
 
 static bool ReplaceUnicodeSpaces(const string &query, string &new_query, vector<UnicodeSpace> &unicode_spaces) {
 	if (unicode_spaces.empty()) {
@@ -44,13 +49,26 @@ static bool ReplaceUnicodeSpaces(const string &query, string &new_query, vector<
 }
 
 static bool IsValidDollarQuotedStringTagFirstChar(const unsigned char &c) {
-	// the first character can be between A-Z, a-z, or \200 - \377
-	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0x80;
+	// the first character can be between A-Z, a-z, underscore, or \200 - \377
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c >= 0x80;
 }
 
 static bool IsValidDollarQuotedStringTagSubsequentChar(const unsigned char &c) {
 	// subsequent characters can also be between 0-9
 	return IsValidDollarQuotedStringTagFirstChar(c) || (c >= '0' && c <= '9');
+}
+
+static void ValidateUTF8Query(const string &query) {
+	UnicodeInvalidReason reason = UnicodeInvalidReason::INVALID_UNICODE;
+	size_t invalid_pos = 0;
+	auto unicode_type = Utf8Proc::Analyze(query.c_str(), query.size(), &reason, &invalid_pos);
+	if (unicode_type != UnicodeType::INVALID) {
+		return;
+	}
+	const char *reason_str =
+	    reason == UnicodeInvalidReason::BYTE_MISMATCH ? "byte sequence mismatch" : "invalid unicode";
+	throw ParserException::SyntaxError(query, StringUtil::Format("Invalid UTF-8 in query (%s)", reason_str),
+	                                   optional_idx(NumericCast<idx_t>(invalid_pos)));
 }
 
 // This function strips unicode space characters from the query and replaces them with regular spaces
@@ -165,177 +183,171 @@ end:
 	return ReplaceUnicodeSpaces(query_str, new_query, unicode_spaces);
 }
 
-vector<string> SplitQueryStringIntoStatements(const string &query) {
-	// Break sql string down into sql statements using the tokenizer
-	vector<string> query_statements;
-	auto tokens = Parser::Tokenize(query);
-	idx_t next_statement_start = 0;
-	for (idx_t i = 1; i < tokens.size(); ++i) {
-		auto &t_prev = tokens[i - 1];
-		auto &t = tokens[i];
-		if (t_prev.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR) {
-			// LCOV_EXCL_START
-			for (idx_t c = t_prev.start; c <= t.start; ++c) {
-				if (query.c_str()[c] == ';') {
-					query_statements.emplace_back(query.substr(next_statement_start, t.start - next_statement_start));
-					next_statement_start = tokens[i].start;
-				}
-			}
-			// LCOV_EXCL_STOP
-		}
+// vector<string> SplitQueries(const string &input_query) {
+// 	vector<string> queries;
+// 	auto tokenized_input = Parser::Tokenize(input_query);
+// 	size_t last_split = 0;
+//
+// 	for (const auto &token : tokenized_input) {
+// 		if (token.type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR && input_query[token.start] == ';') {
+// 			string segment = input_query.substr(last_split, token.start - last_split);
+// 			StringUtil::Trim(segment);
+// 			if (!segment.empty()) {
+// 				segment.append(";");
+// 				queries.push_back(std::move(segment));
+// 			}
+// 			last_split = token.start + 1;
+// 		}
+// 	}
+// 	string final_segment = input_query.substr(last_split);
+// 	StringUtil::Trim(final_segment);
+// 	if (!final_segment.empty()) {
+// 		queries.push_back(std::move(final_segment));
+// 	}
+// 	return queries;
+// }
+
+void Parser::ThrowParserOverrideError(ParserOverrideResult &result) {
+	if (result.type == ParserExtensionResultType::DISPLAY_ORIGINAL_ERROR) {
+		throw ParserException("Parser override failed to return a valid statement: %s\n\nConsider restarting the "
+		                      "database and "
+		                      "using the setting \"set allow_parser_override_extension=fallback\" to fallback to the "
+		                      "default parser.",
+		                      result.error.RawMessage());
 	}
-	query_statements.emplace_back(query.substr(next_statement_start, query.size() - next_statement_start));
-	return query_statements;
+	if (result.type == ParserExtensionResultType::DISPLAY_EXTENSION_ERROR) {
+		result.error.Throw();
+	}
 }
 
 void Parser::ParseQuery(const string &query) {
-	Transformer transformer(options);
-	string parser_error;
-	optional_idx parser_error_location;
+	ValidateUTF8Query(query);
 	{
-		// check if there are any unicode spaces in the string
 		string new_query;
 		if (StripUnicodeSpaces(query, new_query)) {
-			// there are - strip the unicode spaces and re-run the query
 			ParseQuery(new_query);
 			return;
 		}
 	}
-	{
-		PostgresParser::SetPreserveIdentifierCase(options.preserve_identifier_case);
-		bool parsing_succeed = false;
-		// Creating a new scope to prevent multiple PostgresParser destructors being called
-		// which led to some memory issues
-		{
-			PostgresParser parser;
-			parser.Parse(query);
-			if (parser.success) {
-				if (!parser.parse_tree) {
-					// empty statement
-					return;
+	if (options.extensions) {
+		bool has_strict_extension_error = false;
+		ErrorData last_strict_extension_error;
+		for (auto &ext : options.extensions->ParserExtensions()) {
+			if (!ext.parser_override) {
+				continue;
+			}
+			if (options.parser_override_setting == AllowParserOverride::DEFAULT_OVERRIDE) {
+				continue;
+			}
+			auto result = ext.parser_override(ext.parser_info.get(), query, options);
+			if (result.type == ParserExtensionResultType::PARSE_SUCCESSFUL) {
+				statements = std::move(result.statements);
+				return;
+			}
+			if (options.parser_override_setting == AllowParserOverride::STRICT_OVERRIDE) {
+				if (result.type == ParserExtensionResultType::DISPLAY_EXTENSION_ERROR) {
+					has_strict_extension_error = true;
+					last_strict_extension_error = std::move(result.error);
+				} else {
+					has_strict_extension_error = false;
 				}
-
-				// if it succeeded, we transform the Postgres parse tree into a list of
-				// SQLStatements
-				transformer.TransformParseTree(parser.parse_tree, statements);
-				parsing_succeed = true;
-			} else {
-				parser_error = parser.error_message;
-				if (parser.error_location > 0) {
-					parser_error_location = NumericCast<idx_t>(parser.error_location - 1);
-				}
+				continue;
 			}
 		}
-		// If DuckDB fails to parse the entire sql string, break the string down into individual statements
-		// using ';' as the delimiter so that parser extensions can parse the statement
-		if (parsing_succeed) {
-			// no-op
-			// return here would require refactoring into another function. o.w. will just no-op in order to run wrap up
-			// code at the end of this function
-		} else if (!options.extensions || options.extensions->empty()) {
-			throw ParserException::SyntaxError(query, parser_error, parser_error_location);
-		} else {
-			// split sql string into statements and re-parse using extension
-			auto query_statements = SplitQueryStringIntoStatements(query);
-			idx_t stmt_loc = 0;
-			for (auto const &query_statement : query_statements) {
-				ErrorData another_parser_error;
-				// Creating a new scope to allow extensions to use PostgresParser, which is not reentrant
-				{
-					PostgresParser another_parser;
-					another_parser.Parse(query_statement);
-					// LCOV_EXCL_START
-					// first see if DuckDB can parse this individual query statement
-					if (another_parser.success) {
-						if (!another_parser.parse_tree) {
-							// empty statement
-							continue;
-						}
-						transformer.TransformParseTree(another_parser.parse_tree, statements);
-						// important to set in the case of a mixture of DDB and parser ext statements
-						statements.back()->stmt_length = query_statement.size() - 1;
-						statements.back()->stmt_location = stmt_loc;
-						stmt_loc += query_statement.size();
+		if (options.parser_override_setting == AllowParserOverride::STRICT_OVERRIDE && has_strict_extension_error) {
+			last_strict_extension_error.Throw();
+		}
+	}
+	// PEG parser: tokenize then transform
+	auto &cache = GetCache();
+	auto peg_matcher = cache.GetMatcher();
+	auto peg_factory = cache.GetTransformerFactory();
+
+	vector<MatcherToken> tokens;
+	ParserTokenizer tokenizer(query, tokens);
+	tokenizer.TokenizeInput();
+	if (!tokens.empty()) {
+		try {
+			auto peg_statements = peg_factory->Transform(tokens, options, peg_matcher->Root());
+			for (auto &stmt : peg_statements) {
+				statements.push_back(std::move(stmt));
+			}
+		} catch (ParserException &e) {
+			// fall back to parse_function extensions for unknown statement types
+			bool parsed = false;
+			if (options.extensions && options.extensions->HasParserExtensions()) {
+				for (auto &ext : options.extensions->ParserExtensions()) {
+					if (!ext.parse_function) {
 						continue;
-					} else {
-						another_parser_error = ErrorData(another_parser.error_message);
-						if (another_parser.error_location > 0) {
-							another_parser_error.AddQueryLocation(
-							    NumericCast<idx_t>(another_parser.error_location - 1));
-						}
 					}
-				} // LCOV_EXCL_STOP
-				// LCOV_EXCL_START
-				// let extensions parse the statement which DuckDB failed to parse
-				bool parsed_single_statement = false;
-				for (auto &ext : *options.extensions) {
-					D_ASSERT(!parsed_single_statement);
-					D_ASSERT(ext.parse_function);
-					auto result = ext.parse_function(ext.parser_info.get(), query_statement);
+					auto result = ext.parse_function(ext.parser_info.get(), query);
 					if (result.type == ParserExtensionResultType::PARSE_SUCCESSFUL) {
-						auto statement = make_uniq<ExtensionStatement>(ext, std::move(result.parse_data));
-						statement->stmt_length = query_statement.size() - 1;
-						statement->stmt_location = stmt_loc;
-						stmt_loc += query_statement.size();
-						statements.push_back(std::move(statement));
-						parsed_single_statement = true;
+						auto estmt = make_uniq<ExtensionStatement>(ext, std::move(result.parse_data));
+						estmt->stmt_location = 0;
+						estmt->stmt_length = query.size();
+						statements.push_back(std::move(estmt));
+						parsed = true;
 						break;
-					} else if (result.type == ParserExtensionResultType::DISPLAY_EXTENSION_ERROR) {
+					}
+					if (result.type == ParserExtensionResultType::DISPLAY_EXTENSION_ERROR) {
 						throw ParserException::SyntaxError(query, result.error, result.error_location);
-					} else {
-						// We move to the next one!
 					}
 				}
-				if (!parsed_single_statement) {
-					throw ParserException::SyntaxError(query, parser_error, parser_error_location);
-				} // LCOV_EXCL_STOP
+			}
+			if (!parsed) {
+				throw;
 			}
 		}
 	}
+
 	if (!statements.empty()) {
-		auto &last_statement = statements.back();
-		last_statement->stmt_length = query.size() - last_statement->stmt_location;
+		for (idx_t i = 0; i + 1 < statements.size(); i++) {
+			statements[i]->stmt_length = statements[i + 1]->stmt_location - statements[i]->stmt_location;
+		}
+		statements.back()->stmt_length = query.size() - statements.back()->stmt_location;
 		for (auto &statement : statements) {
-			statement->query = query;
+			statement->query = query.substr(statement->stmt_location, statement->stmt_length);
+			statement->stmt_location = 0;
+			statement->stmt_length = statement->query.size();
 			if (statement->type == StatementType::CREATE_STATEMENT) {
 				auto &create = statement->Cast<CreateStatement>();
-				create.info->sql = query.substr(statement->stmt_location, statement->stmt_length);
+				create.info->sql = statement->query;
 			}
 		}
 	}
 }
 
 vector<SimplifiedToken> Parser::Tokenize(const string &query) {
-	auto pg_tokens = PostgresParser::Tokenize(query);
+	HighlightTokenizer tokenizer(query);
+	tokenizer.TokenizeInput();
+
 	vector<SimplifiedToken> result;
-	result.reserve(pg_tokens.size());
-	for (auto &pg_token : pg_tokens) {
-		SimplifiedToken token;
-		switch (pg_token.type) {
-		case duckdb_libpgquery::PGSimplifiedTokenType::PG_SIMPLIFIED_TOKEN_IDENTIFIER:
-			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER;
+	result.reserve(tokenizer.tokens.size());
+	for (auto &token : tokenizer.tokens) {
+		SimplifiedToken simplified;
+		simplified.start = token.offset;
+		switch (token.type) {
+		case TokenType::KEYWORD:
+			simplified.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_KEYWORD;
 			break;
-		case duckdb_libpgquery::PGSimplifiedTokenType::PG_SIMPLIFIED_TOKEN_NUMERIC_CONSTANT:
-			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_NUMERIC_CONSTANT;
+		case TokenType::STRING_LITERAL:
+			simplified.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT;
 			break;
-		case duckdb_libpgquery::PGSimplifiedTokenType::PG_SIMPLIFIED_TOKEN_STRING_CONSTANT:
-			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT;
+		case TokenType::NUMBER_LITERAL:
+			simplified.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_NUMERIC_CONSTANT;
 			break;
-		case duckdb_libpgquery::PGSimplifiedTokenType::PG_SIMPLIFIED_TOKEN_OPERATOR:
-			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR;
+		case TokenType::OPERATOR:
+		case TokenType::TERMINATOR:
+			simplified.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR;
 			break;
-		case duckdb_libpgquery::PGSimplifiedTokenType::PG_SIMPLIFIED_TOKEN_KEYWORD:
-			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_KEYWORD;
-			break;
-		// comments are not supported by our tokenizer right now
-		case duckdb_libpgquery::PGSimplifiedTokenType::PG_SIMPLIFIED_TOKEN_COMMENT: // LCOV_EXCL_START
-			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT;
+		case TokenType::COMMENT:
+			simplified.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT;
 			break;
 		default:
-			throw InternalException("Unrecognized token category");
-		} // LCOV_EXCL_STOP
-		token.start = NumericCast<idx_t>(pg_token.start);
-		result.push_back(token);
+			simplified.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER;
+			break;
+		}
+		result.push_back(simplified);
 	}
 	return result;
 }
@@ -346,18 +358,23 @@ vector<SimplifiedToken> Parser::TokenizeError(const string &error_msg) {
 
 	vector<SimplifiedToken> tokens;
 	// find "XXX Error:" - this marks the start of the error message
-	auto error = StringUtil::Find(error_msg, "Error: ");
+	auto error = StringUtil::Find(error_msg, "Error:");
 	if (error.IsValid()) {
+		SimplifiedToken token;
+		token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR_EMPHASIS;
+		token.start = 0;
+		tokens.push_back(token);
+
+		token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR;
+		token.start = error.GetIndex() + 6;
+		tokens.push_back(token);
+
+		error_start = error.GetIndex() + 6;
+	} else {
 		SimplifiedToken token;
 		token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR;
 		token.start = 0;
 		tokens.push_back(token);
-
-		token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER;
-		token.start = error.GetIndex() + 6;
-		tokens.push_back(token);
-
-		error_start = error.GetIndex() + 7;
 	}
 
 	// find "LINE (number)" - this marks the end of the message
@@ -376,7 +393,7 @@ vector<SimplifiedToken> Parser::TokenizeError(const string &error_msg) {
 			if (error_msg[i] == quote_char) {
 				SimplifiedToken token;
 				token.start = i;
-				token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER;
+				token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR;
 				tokens.push_back(token);
 				in_quotes = false;
 			}
@@ -389,7 +406,7 @@ vector<SimplifiedToken> Parser::TokenizeError(const string &error_msg) {
 			// not quoted and found a quote - enter the quoted state
 			SimplifiedToken token;
 			token.start = i;
-			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_STRING_CONSTANT;
+			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR_SUGGESTION;
 			token.start++;
 			tokens.push_back(token);
 			quote_char = error_msg[i];
@@ -403,7 +420,7 @@ vector<SimplifiedToken> Parser::TokenizeError(const string &error_msg) {
 	if (line_pos.IsValid()) {
 		SimplifiedToken token;
 		token.start = line_pos.GetIndex() + 1;
-		token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT;
+		token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR_EMPHASIS;
 		tokens.push_back(token);
 
 		// tokenize the LINE part
@@ -415,7 +432,7 @@ vector<SimplifiedToken> Parser::TokenizeError(const string &error_msg) {
 		}
 		if (query_start < error_msg.size()) {
 			token.start = query_start;
-			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER;
+			token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR;
 			tokens.push_back(token);
 
 			idx_t query_end;
@@ -439,25 +456,34 @@ vector<SimplifiedToken> Parser::TokenizeError(const string &error_msg) {
 					}
 				}
 			}
+
 			// tokenize the actual query
 			string query = error_msg.substr(query_start, query_end - query_start);
 			auto query_tokens = Tokenize(query);
 			for (auto &query_token : query_tokens) {
 				if (place_caret) {
+					// find the caret position and highlight the identifier it points to
 					if (query_token.start >= caret_position) {
 						// we need to place the caret here
 						query_token.start = query_start + caret_position;
-						query_token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR;
+						query_token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR_EMPHASIS;
 						tokens.push_back(query_token);
 
 						place_caret = false;
 						continue;
 					}
 				}
+				switch (query_token.type) {
+				case SimplifiedTokenType::SIMPLIFIED_TOKEN_KEYWORD:
+					query_token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR_EMPHASIS;
+					break;
+				default:
+					query_token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR;
+					break;
+				}
 				query_token.start += query_start;
 				tokens.push_back(query_token);
 			}
-			// FIXME: find the caret position and highlight/bold the identifier it points to
 			if (query_end < error_msg.size()) {
 				token.start = query_end;
 				token.type = SimplifiedTokenType::SIMPLIFIED_TOKEN_ERROR;
@@ -468,37 +494,29 @@ vector<SimplifiedToken> Parser::TokenizeError(const string &error_msg) {
 	return tokens;
 }
 
-KeywordCategory ToKeywordCategory(duckdb_libpgquery::PGKeywordCategory type) {
-	switch (type) {
-	case duckdb_libpgquery::PGKeywordCategory::PG_KEYWORD_RESERVED:
+KeywordCategory Parser::ToKeywordCategory(const string &text) {
+	auto &helper = PEGKeywordHelper::Instance();
+	if (helper.KeywordCategoryType(text, PEGKeywordCategory::KEYWORD_RESERVED)) {
 		return KeywordCategory::KEYWORD_RESERVED;
-	case duckdb_libpgquery::PGKeywordCategory::PG_KEYWORD_UNRESERVED:
-		return KeywordCategory::KEYWORD_UNRESERVED;
-	case duckdb_libpgquery::PGKeywordCategory::PG_KEYWORD_TYPE_FUNC:
-		return KeywordCategory::KEYWORD_TYPE_FUNC;
-	case duckdb_libpgquery::PGKeywordCategory::PG_KEYWORD_COL_NAME:
-		return KeywordCategory::KEYWORD_COL_NAME;
-	case duckdb_libpgquery::PGKeywordCategory::PG_KEYWORD_NONE:
-		return KeywordCategory::KEYWORD_NONE;
-	default:
-		throw InternalException("Unrecognized keyword category");
 	}
+	if (helper.KeywordCategoryType(text, PEGKeywordCategory::KEYWORD_UNRESERVED)) {
+		return KeywordCategory::KEYWORD_UNRESERVED;
+	}
+	if (helper.KeywordCategoryType(text, PEGKeywordCategory::KEYWORD_TYPE_FUNC)) {
+		return KeywordCategory::KEYWORD_TYPE_FUNC;
+	}
+	if (helper.KeywordCategoryType(text, PEGKeywordCategory::KEYWORD_COL_NAME)) {
+		return KeywordCategory::KEYWORD_COL_NAME;
+	}
+	return KeywordCategory::KEYWORD_NONE;
 }
 
 KeywordCategory Parser::IsKeyword(const string &text) {
-	return ToKeywordCategory(PostgresParser::IsKeyword(text));
+	return ToKeywordCategory(text);
 }
 
 vector<ParserKeyword> Parser::KeywordList() {
-	auto keywords = PostgresParser::KeywordList();
-	vector<ParserKeyword> result;
-	for (auto &kw : keywords) {
-		ParserKeyword res;
-		res.name = kw.text;
-		res.category = ToKeywordCategory(kw.category);
-		result.push_back(res);
-	}
-	return result;
+	return PEGKeywordHelper::Instance().KeywordList();
 }
 
 vector<unique_ptr<ParsedExpression>> Parser::ParseExpressionList(const string &select_list, ParserOptions options) {
@@ -516,6 +534,24 @@ vector<unique_ptr<ParsedExpression>> Parser::ParseExpressionList(const string &s
 		throw ParserException("Expected a single SELECT node");
 	}
 	auto &select_node = select.node->Cast<SelectNode>();
+	if (!select_node.modifiers.empty()) {
+		throw ParserException("Cannot have any modifiers in the expression list");
+	}
+	if (select_node.where_clause) {
+		throw ParserException("Cannot have a WHERE clause in the expression list");
+	}
+	if (!select_node.groups.group_expressions.empty()) {
+		throw ParserException("Cannot have a GROUP BY clause in the expression list");
+	}
+	if (select_node.having) {
+		throw ParserException("Cannot have a HAVING clause in the expression list");
+	}
+	if (select_node.qualify) {
+		throw ParserException("Cannot have a QUALIFY clause in the expression list");
+	}
+	if (select_node.sample) {
+		throw ParserException("Cannot have a SAMPLE clause in the expression list");
+	}
 	return std::move(select_node.select_list);
 }
 
@@ -568,8 +604,8 @@ void Parser::ParseUpdateList(const string &update_list, vector<string> &update_c
 		throw ParserException("Expected a single UPDATE statement");
 	}
 	auto &update = parser.statements[0]->Cast<UpdateStatement>();
-	update_columns = std::move(update.set_info->columns);
-	expressions = std::move(update.set_info->expressions);
+	update_columns = std::move(update.node->set_info->columns);
+	expressions = std::move(update.node->set_info->expressions);
 }
 
 vector<vector<unique_ptr<ParsedExpression>>> Parser::ParseValuesList(const string &value_list, ParserOptions options) {
@@ -607,6 +643,11 @@ ColumnList Parser::ParseColumnList(const string &column_list, ParserOptions opti
 	}
 	auto &info = create.info->Cast<CreateTableInfo>();
 	return std::move(info.columns);
+}
+
+ColumnDefinition Parser::ParseColumnDefinition(const string &column_definition, ParserOptions options) {
+	auto column_list = ParseColumnList(column_definition, options);
+	return column_list.GetColumn(LogicalIndex(0)).Copy();
 }
 
 } // namespace duckdb

@@ -1,6 +1,8 @@
 #include "duckdb/common/types/cast_helpers.hpp"
 #include "duckdb/execution/operator/csv_scanner/sniffer/csv_sniffer.hpp"
 #include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/parser/simplified_token.hpp"
 
 #include "utf8proc.hpp"
 
@@ -43,6 +45,11 @@ static string TrimWhitespace(const string &col_name) {
 
 	// return the trimmed string
 	return col_name.substr(begin, end - begin);
+}
+
+bool NormalizeThis(const KeywordCategory category, const string &col_name) {
+	return category == KeywordCategory::KEYWORD_UNRESERVED || category == KeywordCategory::KEYWORD_TYPE_FUNC ||
+	       category == KeywordCategory::KEYWORD_RESERVED;
 }
 
 static string NormalizeColumnName(const string &col_name) {
@@ -89,8 +96,8 @@ static string NormalizeColumnName(const string &col_name) {
 
 	// prepend _ if name starts with a digit or is a reserved keyword
 	auto keyword = KeywordHelper::KeywordCategoryType(col_name_cleaned);
-	if (keyword == KeywordCategory::KEYWORD_TYPE_FUNC || keyword == KeywordCategory::KEYWORD_RESERVED ||
-	    (col_name_cleaned[0] >= '0' && col_name_cleaned[0] <= '9')) {
+
+	if (NormalizeThis(keyword, col_name_cleaned) || (col_name_cleaned[0] >= '0' && col_name_cleaned[0] <= '9')) {
 		col_name_cleaned = "_" + col_name_cleaned;
 	}
 	return col_name_cleaned;
@@ -98,7 +105,7 @@ static string NormalizeColumnName(const string &col_name) {
 
 static void ReplaceNames(vector<string> &detected_names, CSVStateMachine &state_machine,
                          unordered_map<idx_t, vector<LogicalType>> &best_sql_types_candidates_per_column_idx,
-                         CSVReaderOptions &options, const MultiFileReaderOptions &file_options,
+                         CSVReaderOptions &options, const MultiFileOptions &file_options,
                          const vector<HeaderValue> &best_header_row, CSVErrorHandler &error_handler) {
 	auto &dialect_options = state_machine.dialect_options;
 	if (!options.columns_set) {
@@ -177,7 +184,8 @@ bool CSVSniffer::DetectHeaderWithSetColumn(ClientContext &context, vector<Header
 			if (sql_type != LogicalType::VARCHAR) {
 				all_varchar = false;
 				if (!CSVSniffer::CanYouCastIt(context, best_header_row[col].value, sql_type, options.dialect_options,
-				                              best_header_row[col].IsNull(), options.decimal_separator[0])) {
+				                              best_header_row[col].IsNull(), options.decimal_separator[0],
+				                              options.thousands_separator)) {
 					first_row_consistent = false;
 				}
 			}
@@ -214,7 +222,7 @@ bool EmptyHeader(const string &col_name, bool is_null, bool normalize) {
 vector<string> CSVSniffer::DetectHeaderInternal(
     ClientContext &context, vector<HeaderValue> &best_header_row, CSVStateMachine &state_machine,
     const SetColumns &set_columns, unordered_map<idx_t, vector<LogicalType>> &best_sql_types_candidates_per_column_idx,
-    CSVReaderOptions &options, const MultiFileReaderOptions &file_options, CSVErrorHandler &error_handler) {
+    CSVReaderOptions &options, const MultiFileOptions &file_options, CSVErrorHandler &error_handler) {
 	vector<string> detected_names;
 	auto &dialect_options = state_machine.dialect_options;
 	dialect_options.num_cols = best_sql_types_candidates_per_column_idx.size();
@@ -265,7 +273,8 @@ vector<string> CSVSniffer::DetectHeaderInternal(
 			if (sql_type != LogicalType::VARCHAR) {
 				all_varchar = false;
 				if (!CanYouCastIt(context, best_header_row[col].value, sql_type, dialect_options,
-				                  best_header_row[col].IsNull(), options.decimal_separator[0])) {
+				                  best_header_row[col].IsNull(), options.decimal_separator[0],
+				                  options.thousands_separator)) {
 					first_row_consistent = false;
 				}
 			}
@@ -344,10 +353,10 @@ void CSVSniffer::DetectHeader() {
 		// This file only contains a header, lets default to the lowest type of all.
 		detected_types.clear();
 		for (idx_t i = 0; i < names.size(); i++) {
-			detected_types.push_back(LogicalType::BOOLEAN);
+			detected_types.push_back(LogicalType::SQLNULL);
 		}
 	}
-	for (idx_t i = max_columns_found; i < names.size(); i++) {
+	for (idx_t i = detected_types.size(); i < names.size(); i++) {
 		detected_types.push_back(LogicalType::VARCHAR);
 	}
 	max_columns_found = names.size();

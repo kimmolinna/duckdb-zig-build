@@ -4,6 +4,23 @@
 
 namespace duckdb {
 
+void ClientConfig::SetUserVariable(const String &name, Value value) {
+	user_variables[name.ToStdString()] = std::move(value);
+}
+
+bool ClientConfig::GetUserVariable(const string &name, Value &result) {
+	auto entry = user_variables.find(name);
+	if (entry == user_variables.end()) {
+		return false;
+	}
+	result = entry->second;
+	return true;
+}
+
+void ClientConfig::ResetUserVariable(const String &name) {
+	user_variables.erase(name.ToStdString());
+}
+
 void ClientConfig::SetDefaultStreamingBufferSize() {
 	auto memory = FileSystem::GetAvailableMemory();
 	auto default_size = ClientConfig().streaming_buffer_size;

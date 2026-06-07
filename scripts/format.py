@@ -9,14 +9,28 @@ import inspect
 import subprocess
 import difflib
 import re
+import tempfile
+import uuid
 import concurrent.futures
+import argparse
+import shutil
+import traceback
 from python_helpers import open_utf8
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from format_test_benchmark import format_file_content
+
+# Ensure binaries installed into the current Python environment are discoverable.
+# This is required when invoking this script via an explicit venv python path.
+python_bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+os.environ['PATH'] = python_bin_dir + os.pathsep + os.environ.get('PATH', '')
 
 try:
     ver = subprocess.check_output(('black', '--version'), text=True)
     if int(ver.split(' ')[1].split('.')[0]) < 24:
         print('you need to run `pip install "black>=24"`', ver)
-        exit(-1)
+        if 'DUCKDB_FORMAT_SKIP_VERSION_CHECKS' not in os.environ:
+            exit(-1)
 except Exception as e:
     print('you need to run `pip install "black>=24"`', e)
     exit(-1)
@@ -25,7 +39,8 @@ try:
     ver = subprocess.check_output(('clang-format', '--version'), text=True)
     if '11.' not in ver:
         print('you need to run `pip install clang_format==11.0.1 - `', ver)
-        exit(-1)
+        if 'DUCKDB_FORMAT_SKIP_VERSION_CHECKS' not in os.environ:
+            exit(-1)
 except Exception as e:
     print('you need to run `pip install clang_format==11.0.1 - `', e)
     exit(-1)
@@ -60,7 +75,6 @@ ignored_files = [
     'tpch_constants.hpp',
     'tpcds_constants.hpp',
     '_generated',
-    'tpce_flat_input.hpp',
     'test_csv_header.hpp',
     'duckdb.cpp',
     'duckdb.hpp',
@@ -87,6 +101,7 @@ ignored_files = [
     'yyjson.cpp',
     'yyjson.hpp',
     'duckdb_pdqsort.hpp',
+    'pdqsort.h',
     'stubdata.cpp',
     'nf_calendar.cpp',
     'nf_calendar.h',
@@ -102,12 +117,10 @@ ignored_directories = [
     '.eggs',
     '__pycache__',
     'dbgen',
-    os.path.join('tools', 'pythonpkg', 'duckdb'),
-    os.path.join('tools', 'pythonpkg', 'build'),
     os.path.join('tools', 'rpkg', 'src', 'duckdb'),
     os.path.join('tools', 'rpkg', 'inst', 'include', 'cpp11'),
+    os.path.join('extension', 'external'),
     os.path.join('extension', 'tpcds', 'dsdgen'),
-    os.path.join('extension', 'jemalloc', 'jemalloc'),
     os.path.join('extension', 'icu', 'third_party'),
     os.path.join('tools', 'nodejs', 'src', 'duckdb'),
 ]
@@ -118,42 +131,59 @@ silent = False
 force = False
 
 
-def print_usage():
-    print("Usage: python scripts/format.py [revision|--all] [--check|--fix] [--force]")
-    print(
-        "   [revision]     is an optional revision number, all files that changed since that revision will be formatted (default=HEAD)"
-    )
-    print("                  if [revision] is set to --all, all files will be formatted")
-    print("   --check only prints differences, --fix also fixes the files (--check is default)")
+parser = argparse.ArgumentParser(prog='python scripts/format.py', description='Format source directory files')
+parser.add_argument(
+    'revision', nargs='?', default='HEAD', help='Revision number or --all to format all files (default: HEAD)'
+)
+parser.add_argument('--check', action='store_true', help='Only print differences (default)')
+parser.add_argument('--fix', action='store_true', help='Fix the files')
+parser.add_argument('-a', '--all', action='store_true', help='Format all files')
+parser.add_argument('-d', '--directories', nargs='*', default=[], help='Format specified directories')
+parser.add_argument('-C', '--workdir', type=str, help='Change work directory')
+parser.add_argument('-y', '--noconfirm', action='store_true', help='Skip confirmation prompt')
+parser.add_argument('-q', '--silent', action='store_true', help='Suppress output')
+parser.add_argument('-f', '--force', action='store_true', help='Force formatting')
+args = parser.parse_args()
+
+revision = args.revision
+if args.check and args.fix:
+    parser.print_usage()
     exit(1)
 
+if args.workdir:
+    os.chdir(args.workdir)
 
-if len(sys.argv) == 1:
-    revision = "HEAD"
-elif len(sys.argv) >= 2:
-    revision = sys.argv[1]
-else:
-    print_usage()
+check_only = not args.fix
+confirm = not args.noconfirm
+silent = args.silent
+force = args.force
+format_all = args.all
+if args.directories:
+    formatted_directories = args.directories
 
-if len(sys.argv) > 2:
-    for arg in sys.argv[2:]:
-        if arg == '--check':
-            check_only = True
-        elif arg == '--fix':
-            check_only = False
-        elif arg == '--noconfirm':
-            confirm = False
-        elif arg == '--confirm':
-            confirm = True
-        elif arg == '--silent':
-            silent = True
-        elif arg == '--force':
-            force = True
-        else:
-            print_usage()
 
-if revision == '--all':
-    format_all = True
+def get_typos_targets():
+    if format_all:
+        return [path for path in formatted_directories if os.path.exists(path)]
+    return sorted(set([f.full_path for f in files if os.path.exists(f.full_path)]))
+
+
+def run_typos_check():
+    typos_targets = get_typos_targets()
+    if not typos_targets:
+        return 0
+    # Ignore typos check for non-duckdb code.
+    if not os.path.isfile('scripts/typos.toml'):
+        return 0
+    typos_command = ['typos', '--force-exclude']
+    if not check_only:
+        typos_command.append('-w')
+    typos_command += ['-c', 'scripts/typos.toml'] + typos_targets
+    try:
+        return subprocess.call(typos_command)
+    except FileNotFoundError:
+        print('typos not found. Install it with "brew install typos-cli"')
+        return 1
 
 
 def file_is_ignored(full_path):
@@ -196,7 +226,7 @@ if check_only:
 
 def get_changed_files(revision):
     proc = subprocess.Popen(['git', 'diff', '--name-only', revision], stdout=subprocess.PIPE)
-    files = proc.stdout.read().decode('utf8').split('\n')
+    files = proc.stdout.read().decode('utf8', errors='backslashreplace').split('\n')
     changed_files = []
     for f in files:
         if not can_format_file(f):
@@ -218,7 +248,7 @@ elif os.path.isdir(revision):
     for fname in changed_files:
         print(fname)
 elif not format_all:
-    if revision == 'main':
+    if revision == 'main' and os.environ.get('DUCKDB_FORMAT_SKIP_FETCH') != '1':
         # fetch new changes when comparing to the master
         os.system("git fetch origin main:main")
     print(action + " since branch or revision: " + revision)
@@ -301,44 +331,24 @@ def get_formatted_text(f, full_path, directory, ext):
                 text += line
 
     if ext == '.test' or ext == '.test_slow' or ext == '.test_coverage' or ext == '.benchmark':
-        f = open_utf8(full_path, 'r')
-        lines = f.readlines()
-        f.close()
-
-        found_name = False
-        found_group = False
-        group_name = full_path.split('/')[-2]
-        new_path_line = '# name: ' + full_path + '\n'
-        new_group_line = '# group: [' + group_name + ']' + '\n'
-        found_diff = False
-        # Find description.
-        found_description = False
-        for line in lines:
-            if line.lower().startswith('# description:') or line.lower().startswith('#description:'):
-                if found_description:
-                    print("Error formatting file " + full_path + ", multiple lines starting with # description found")
-                    exit(1)
-                found_description = True
-                new_description_line = '# description: ' + line.split(':', 1)[1].strip() + '\n'
-        # Filter old meta.
-        meta = ['#name:', '# name:', '#description:', '# description:', '#group:', '# group:']
-        lines = [line for line in lines if not any(line.lower().startswith(m) for m in meta)]
-        # Clean up empty leading lines.
-        while lines and not lines[0].strip():
-            lines.pop(0)
-        # Ensure header is prepended.
-        header = [new_path_line]
-        if found_description:
-            header.append(new_description_line)
-        header.append(new_group_line)
-        header.append('\n')
-        return ''.join(header + lines)
+        # optimization: import and call the function directly
+        # instead of running a subprocess
+        with open(full_path, "r", encoding="utf-8", errors='surrogateescape') as f:
+            original_lines = f.readlines()
+        formatted, status = format_file_content(full_path, original_lines)
+        if formatted is None:
+            print(f"Failed to format {full_path}: {status}")
+            sys.exit(1)
+        return formatted
     proc_command = format_commands[ext].split(' ') + [full_path]
     proc = subprocess.Popen(
-        proc_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=open(full_path) if ext == '.py' else None
+        proc_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=open(full_path, encoding='utf8', errors='backslashreplace') if ext == '.py' else None,
     )
-    new_text = proc.stdout.read().decode('utf8')
-    stderr = proc.stderr.read().decode('utf8')
+    new_text = proc.stdout.read().decode('utf8', errors='backslashreplace')
+    stderr = proc.stderr.read().decode('utf8', errors='backslashreplace')
     if len(stderr) > 0:
         print(os.getcwd())
         print("Failed to format file " + full_path)
@@ -358,7 +368,7 @@ def file_is_generated(text):
 
 def format_file(f, full_path, directory, ext):
     global difference_files
-    with open_utf8(full_path, 'r') as f:
+    with open_utf8(full_path, 'r', errors='surrogateescape') as f:
         old_text = f.read()
     # do not format auto-generated files
     if file_is_generated(old_text) and ext != '.py':
@@ -387,34 +397,36 @@ def format_file(f, full_path, directory, ext):
             print(total_diff)
             difference_files.append(full_path)
     else:
-        tmpfile = full_path + ".tmp"
-        with open_utf8(tmpfile, 'w+') as f:
+        tmpfile = os.path.join(tempfile.gettempdir(), str(uuid.uuid4()))
+        with open_utf8(tmpfile, 'w+', newline='\n', errors='surrogateescape') as f:
             f.write(new_text)
-        os.rename(tmpfile, full_path)
+        shutil.move(tmpfile, full_path)
+
+
+class ToFormatFile:
+    def __init__(self, filename, full_path, directory):
+        self.filename = filename
+        self.full_path = full_path
+        self.directory = directory
+        self.ext = '.' + filename.split('.')[-1]
 
 
 def format_directory(directory):
     files = os.listdir(directory)
     files.sort()
-
-    def process_file(f):
+    result = []
+    for f in files:
         full_path = os.path.join(directory, f)
         if os.path.isdir(full_path):
             if f in ignored_directories or full_path in ignored_directories:
-                return
-            if not silent:
-                print(full_path)
-            format_directory(full_path)
+                continue
+            result += format_directory(full_path)
         elif can_format_file(full_path):
-            format_file(f, full_path, directory, '.' + f.split('.')[-1])
-
-    # Create thread for each file
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        threads = [executor.submit(process_file, f) for f in files]
-        # Wait for all tasks to complete
-        concurrent.futures.wait(threads)
+            result += [ToFormatFile(f, full_path, directory)]
+    return result
 
 
+files = []
 if format_all:
     try:
         os.system(cmake_format_command.replace("${FILE}", "CMakeLists.txt"))
@@ -422,15 +434,37 @@ if format_all:
         pass
 
     for direct in formatted_directories:
-        format_directory(direct)
+        files += format_directory(direct)
 
 else:
     for full_path in changed_files:
         splits = full_path.split(os.path.sep)
         fname = splits[-1]
         dirname = os.path.sep.join(splits[:-1])
-        ext = '.' + full_path.split('.')[-1]
-        format_file(fname, full_path, dirname, ext)
+        files.append(ToFormatFile(fname, full_path, dirname))
+
+
+def process_file(f):
+    if not silent:
+        print(f.full_path)
+    try:
+        format_file(f.filename, f.full_path, f.directory, f.ext)
+    except:
+        print(traceback.format_exc())
+        sys.exit(1)
+
+
+# Create thread for each file
+with concurrent.futures.ThreadPoolExecutor() as executor:
+    try:
+        threads = [executor.submit(process_file, f) for f in files]
+        # Wait for all tasks to complete
+        concurrent.futures.wait(threads)
+    except KeyboardInterrupt:
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+
+typos_status = run_typos_check()
 
 if check_only:
     if len(difference_files) > 0:
@@ -442,6 +476,10 @@ if check_only:
             print("- " + fname)
         print('Run "make format-fix" to fix these differences automatically')
         exit(1)
+    if typos_status != 0:
+        exit(1)
     else:
         print("Passed format-check")
         exit(0)
+elif typos_status != 0:
+    exit(1)

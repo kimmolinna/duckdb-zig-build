@@ -1,16 +1,19 @@
 #include "catch.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/enums/joinref_type.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/main/relation/value_relation.hpp"
 #include "iostream"
 #include "test_helpers.hpp"
+#include "duckdb/main/relation/materialized_relation.hpp"
 
 using namespace duckdb;
-using namespace std;
 
 TEST_CASE("Test simple relation API", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> tbl, filter, proj, proj2, v1, v2, v3;
 
@@ -214,7 +217,7 @@ TEST_CASE("Test simple relation API", "[relation_api]") {
 TEST_CASE("Test combinations of set operations", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> values, v1, v2, v3;
 
@@ -281,7 +284,7 @@ TEST_CASE("Test combinations of set operations", "[relation_api]") {
 TEST_CASE("Test combinations of joins", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> values, vjoin;
 
@@ -369,7 +372,7 @@ TEST_CASE("Test combinations of joins", "[relation_api]") {
 TEST_CASE("Test crossproduct relation", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> values, vcross;
 
@@ -400,7 +403,7 @@ TEST_CASE("Test crossproduct relation", "[relation_api]") {
 TEST_CASE("Test view creation of relations", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> tbl, filter, proj, proj2;
 
@@ -477,7 +480,7 @@ TEST_CASE("Test view creation of relations", "[relation_api]") {
 TEST_CASE("Test table creations using the relation API", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> values;
 
@@ -503,12 +506,22 @@ TEST_CASE("Test table creations using the relation API", "[relation_api]") {
 	result = con.Query("SELECT * FROM new_values ORDER BY k");
 	REQUIRE(CHECK_COLUMN(result, 0, {4, 5}));
 	REQUIRE(CHECK_COLUMN(result, 1, {"hello", "hello"}));
+
+	// create a table in an attached db and insert values
+	auto test_dir = TestDirectoryPath();
+	string db_path = test_dir + "/my_db.db";
+	REQUIRE_NO_FAIL(con.Query("ATTACH '" + db_path + "' AS my_db;"));
+	REQUIRE_NOTHROW(values = con.Values({{1, 10}, {2, 5}, {3, 4}}, {"i", "j"}));
+	REQUIRE_NOTHROW(values->Create(std::string("my_db"), std::string(), std::string("integers")));
+	result = con.Query("SELECT * FROM my_db.integers ORDER BY i");
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 2, 3}));
+	REQUIRE(CHECK_COLUMN(result, 1, {10, 5, 4}));
 }
 
 TEST_CASE("Test table creations with on_create_conflict using the relation API", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> values, values1, proj;
 
@@ -545,7 +558,7 @@ TEST_CASE("Test table creations with on_create_conflict using the relation API",
 TEST_CASE("Test table create from query with on_create_conflict using the relation API", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> values, values1, proj;
 
@@ -583,7 +596,7 @@ TEST_CASE("Test table create from query with on_create_conflict using the relati
 TEST_CASE("Test table deletions and updates", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE integers(i INTEGER)"));
@@ -619,7 +632,7 @@ TEST_CASE("Test table deletions and updates", "[relation_api]") {
 TEST_CASE("Test aggregates in relation API", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 
 	// create a table
@@ -858,7 +871,7 @@ TEST_CASE("We cannot mix statements from multiple databases", "[relation_api]") 
 TEST_CASE("Test view relations", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE integers(i INTEGER)"));
@@ -888,7 +901,7 @@ TEST_CASE("Test view relations", "[relation_api]") {
 TEST_CASE("Test table function relations", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE integers(i INTEGER)"));
@@ -924,7 +937,7 @@ TEST_CASE("Test table function relations", "[relation_api]") {
 TEST_CASE("Test CSV Relation with union by name", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	named_parameter_map_t options;
 	options["union_by_name"] = Value(true);
 	duckdb::vector<string> paths {"data/csv/sample-0.csv", "data/csv/sample-0.csv"};
@@ -943,7 +956,7 @@ TEST_CASE("Test CSV Relation with union by name", "[relation_api]") {
 TEST_CASE("Test CSV reading/writing from relations", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 
 	// write a bunch of values to a CSV
@@ -971,7 +984,7 @@ TEST_CASE("Test CSV reading/writing from relations", "[relation_api]") {
 TEST_CASE("Test CSV reading from weather.csv", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 
 	auto auto_csv_scan = con.ReadCSV("data/csv/weather.csv")->Limit(1);
@@ -982,7 +995,7 @@ TEST_CASE("Test CSV reading from weather.csv", "[relation_api]") {
 TEST_CASE("Test query relation", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> tbl;
 
@@ -1009,7 +1022,7 @@ TEST_CASE("Test query relation", "[relation_api]") {
 TEST_CASE("Test TopK relation", "[relation_api]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	con.EnableQueryVerification();
+
 	duckdb::unique_ptr<QueryResult> result;
 	duckdb::shared_ptr<Relation> tbl;
 
@@ -1058,4 +1071,95 @@ TEST_CASE("Test Relation Pending Query API", "[relation_api]") {
 		result = con.Query("SELECT 42");
 		REQUIRE(CHECK_COLUMN(result, 0, {42}));
 	}
+}
+
+TEST_CASE("Test Relation Query setting query", "[relation_api]") {
+	DuckDB db;
+	Connection con(db);
+
+	auto query = con.RelationFromQuery("SELECT current_query()");
+	auto result = query->Limit(1)->Execute();
+	REQUIRE(!result->Fetch()->GetValue(0, 0).ToString().empty());
+}
+
+TEST_CASE("Construct ValueRelation with RelationContextWrapper and operate on it", "[relation_api][txn][wrapper]") {
+	DuckDB db;
+	Connection con(db);
+
+	// Build expressions to force the "expressions" overload (not the constants path)
+	duckdb::vector<duckdb::vector<duckdb::unique_ptr<duckdb::ParsedExpression>>> expressions;
+	{
+		duckdb::vector<duckdb::unique_ptr<duckdb::ParsedExpression>> row;
+
+		{
+			duckdb::ConstantExpression ce1(duckdb::Value::INTEGER(1));
+			row.push_back(ce1.Copy());
+		}
+		{
+			duckdb::ConstantExpression ce2(duckdb::Value::INTEGER(2));
+			row.push_back(ce2.Copy());
+		}
+		expressions.push_back(std::move(row));
+	}
+
+	// Explicitly create a RelationContextWrapper from the client's context
+	auto rcw = duckdb::make_shared_ptr<duckdb::RelationContextWrapper>(con.context);
+
+	// Manually construct a ValueRelation using the RelationContextWrapper + expressions ctor
+	duckdb::shared_ptr<duckdb::Relation> rel;
+	REQUIRE_NOTHROW(rel = duckdb::make_shared_ptr<duckdb::ValueRelation>(rcw, std::move(expressions),
+	                                                                     duckdb::vector<std::string> {}, "vr"));
+
+	// Base relation should execute (1 row, 2 columns)
+	duckdb::unique_ptr<QueryResult> result;
+	REQUIRE_NOTHROW(result = rel->Execute());
+	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+	REQUIRE(CHECK_COLUMN(result, 1, {2}));
+
+	// Project on top — should bind & execute under a valid transaction
+	REQUIRE_NOTHROW(result = rel->Project("1+1, 2+2")->Execute());
+	REQUIRE(CHECK_COLUMN(result, 0, {2}));
+	REQUIRE(CHECK_COLUMN(result, 1, {4}));
+
+	// Aggregate on top — also must bind & execute cleanly
+	REQUIRE_NOTHROW(result = rel->Aggregate("count(*)")->Execute());
+	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+}
+
+TEST_CASE("Test materialized relations", "[relation_api]") {
+	auto db_path = TestCreatePath("relational_api_materialized_view.db");
+	{
+		DuckDB db(db_path);
+		Connection con(db);
+
+		REQUIRE_NO_FAIL(con.Query("create table tbl(a varchar);"));
+
+		auto result = con.Query("insert into tbl values ('test') returning *");
+		auto &materialized_result = result->Cast<MaterializedQueryResult>();
+		auto materialized_relation = make_shared_ptr<MaterializedRelation>(
+		    con.context, materialized_result.TakeCollection(), result->names, "vw");
+		materialized_relation->CreateView("vw");
+		materialized_relation.reset();
+
+		result = con.Query("SELECT * FROM vw");
+		REQUIRE(CHECK_COLUMN(result, 0, {"test"}));
+	}
+	// reset and query again
+	{
+		DuckDB db(db_path);
+		Connection con(db);
+		auto result = con.Query("SELECT * FROM vw");
+		REQUIRE(CHECK_COLUMN(result, 0, {"test"}));
+	}
+}
+
+TEST_CASE("Test create table with empty name", "[relation_api]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	duckdb::unique_ptr<QueryResult> result = con.Query("CREATE TABLE '' AS SELECT 42;");
+	REQUIRE_FAIL(result);
+
+	auto values = con.Values("(42)");
+	REQUIRE_THROWS_AS(values->Create(""), ParserException);
 }

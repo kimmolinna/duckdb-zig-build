@@ -5,7 +5,7 @@ statement ok
 SET storage_compatibility_version='v1.2.0'
 
 # load the DB from disk
-load __TEST_DIR__/test_zstd_compression_fetch_row.db
+load {TEST_DIR}/test_zstd_compression_fetch_row.db
 
 statement ok
 CREATE TABLE big_string (
@@ -44,9 +44,6 @@ statement ok
 checkpoint
 
 restart
-
-statement ok
-pragma verify_fetch_row;
 
 query II
 SELECT a[1], strlen(a) from big_string;

@@ -18,48 +18,62 @@
 
 namespace duckdb {
 
+struct GlobalFileState;
+struct BoundOrderByNode;
+
+struct CopyToFileInfo {
+	explicit CopyToFileInfo(string file_path_p) : file_path(std::move(file_path_p)) {
+	}
+
+	string file_path;
+	unique_ptr<CopyFunctionFileStatistics> file_stats;
+	Value partition_keys;
+};
+
 //! Copy the contents of a query into a table
 class PhysicalCopyToFile : public PhysicalOperator {
 public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::COPY_TO_FILE;
 
 public:
-	PhysicalCopyToFile(vector<LogicalType> types, CopyFunction function, unique_ptr<FunctionData> bind_data,
-	                   idx_t estimated_cardinality);
-
-	CopyFunction function;
-	unique_ptr<FunctionData> bind_data;
-	string file_path;
-	bool use_tmp_file;
-	FilenamePattern filename_pattern;
-	string file_extension;
-	CopyOverwriteMode overwrite_mode;
-	bool parallel;
-	bool per_thread_output;
-	optional_idx file_size_bytes;
-	bool rotate;
-	CopyFunctionReturnType return_type;
-
-	bool partition_output;
-	bool write_partition_columns;
-	vector<idx_t> partition_columns;
-	vector<string> names;
-	vector<LogicalType> expected_types;
+	PhysicalCopyToFile(PhysicalPlan &physical_plan, vector<LogicalType> types, CopyFunction function,
+	                   unique_ptr<FunctionData> bind_data, idx_t estimated_cardinality);
 
 public:
-	// Source interface
-	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override;
-
-	bool IsSource() const override {
-		return true;
-	}
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
 
 public:
-	// Sink interface
+	static string GetTrimmedPath(ClientContext &context, const string &file_path);
+	static void MoveTmpFile(ClientContext &context, const string &tmp_file_path);
+	static string GetNonTmpFile(ClientContext &context, const string &tmp_file_path);
+	static void ReturnStatistics(DataChunk &chunk, CopyToFileInfo &written_file_info);
+
+	bool Rotate() const;
+
+	void PrepareAndFlushBatch(ClientContext &context, GlobalSinkState &gstate_p,
+	                          unique_ptr<GlobalFileState> &file_state_ptr,
+	                          const std::function<unique_ptr<GlobalFileState>()> &create_file_state_fun,
+	                          unique_ptr<ColumnDataCollection> batch) const;
+	pair<const CopyFunctionBatchAnalyzer, unique_ptr<PreparedBatchData>>
+	PrepareBatch(ClientContext &context, GlobalSinkState &gstate_p, unique_ptr<GlobalFileState> &file_state_ptr,
+	             const std::function<unique_ptr<GlobalFileState>()> &create_file_state_fun,
+	             unique_ptr<ColumnDataCollection> batch) const;
+	void FlushBatch(ClientContext &context, GlobalSinkState &gstate_p, unique_ptr<GlobalFileState> &file_state_ptr,
+	                const std::function<unique_ptr<GlobalFileState>()> &create_file_state_fun,
+	                const CopyFunctionBatchAnalyzer &batch_analyzer,
+	                unique_ptr<PreparedBatchData> prepared_batch) const;
+
+public:
+	//===--------------------------------------------------------------------===//
+	// Sink Interface
+	//===--------------------------------------------------------------------===//
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
+	//! Synchronously complete any pending partitioned-copy flush work after Finalize has been called.
+	//! Used by callers (e.g. DuckLakeUpdate) that drive Sink/Finalize/GetData manually outside a pipeline.
+	void FinalizePartitionedSync(ExecutionContext &execution_context, InterruptState &interrupt_state) const;
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 
@@ -75,13 +89,62 @@ public:
 		return per_thread_output || partition_output || parallel;
 	}
 
-	static void MoveTmpFile(ClientContext &context, const string &tmp_file_path);
-	static string GetNonTmpFile(ClientContext &context, const string &tmp_file_path);
+public:
+	//===--------------------------------------------------------------------===//
+	// Source Interface
+	//===--------------------------------------------------------------------===//
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
 
-	string GetTrimmedPath(ClientContext &context) const;
+	bool IsSource() const override {
+		return true;
+	}
 
-private:
-	unique_ptr<GlobalFunctionData> CreateFileState(ClientContext &context, GlobalSinkState &sink,
-	                                               StorageLockKey &global_lock) const;
+public:
+	//! Function and associated bind data
+	CopyFunction function;
+	unique_ptr<FunctionData> bind_data;
+
+	//! Names and types going into the file(s)
+	vector<string> names;
+	vector<LogicalType> expected_types;
+
+	//! Where to write the file
+	string file_path;
+	//! Pattern to use for the file names
+	FilenamePattern filename_pattern;
+	//! File extension, e.g., "parquet"
+	string file_extension;
+
+	//! Whether we can write in parallel
+	bool parallel;
+	//! Whether each threads creates their own output file
+	bool per_thread_output;
+
+	//! Fine-grained control over writes
+	optional_idx batch_size;
+	optional_idx batch_size_bytes;
+	optional_idx batches_per_file;
+	optional_idx file_size_bytes;
+
+	//! Whether to write to a temp file before writing to the file at "file_path"
+	bool use_tmp_file;
+	//! What to do when the "file_path" conflicts with an existing file
+	CopyOverwriteMode overwrite_mode;
+	//! What to return, e.g., number of written rows
+	CopyFunctionReturnType return_type;
+	//! Whether to write an empty file if there was no data
+	bool write_empty_file;
+
+	//! Partitioning-related
+	vector<idx_t> partition_columns;
+	bool partition_output;
+	bool write_partition_columns;
+	bool hive_file_pattern;
+
+	//! If the data should be sorted
+	vector<BoundOrderByNode> order_columns;
 };
+
 } // namespace duckdb
